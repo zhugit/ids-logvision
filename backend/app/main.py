@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import asyncio
 from typing import Optional, Any
 
@@ -17,7 +17,7 @@ from .stream import (
     publish_rawlog,
     publish_alert,
     stream_xread,
-    get_redis,            # ✅ 需要你在 stream.py 里加这个（上一条我给过完整 stream.py）
+    get_redis,
     redis_info,
     stream_lengths,
     ensure_streams,
@@ -25,6 +25,10 @@ from .stream import (
 
 from .services.parser.ssh import parse_ssh_failed
 from .services.detector.ssh_bruteforce import detect_ssh_bruteforce
+
+# ✅✅✅ DEBUG：确认当前运行时加载的 parse_ssh_failed 到底来自哪个文件（只定位，不影响功能）
+import inspect
+print("[DEBUG] parse_ssh_failed from:", inspect.getfile(parse_ssh_failed))
 
 app = FastAPI(title="Real-time Log IDS")
 
@@ -36,11 +40,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ✅ 中国时区（UTC+8）
+CHINA_TZ = timezone(timedelta(hours=8))
+
+def now_cn() -> datetime:
+    return datetime.now(CHINA_TZ)
+
+def fmt_cn(dt: Optional[datetime]) -> str:
+    """统一输出中国时间字符串，前端直接展示，不再解析时区。"""
+    if not dt:
+        return ""
+    # dt 可能是 naive（MySQL DATETIME 读出来通常是 naive）
+    # 这里按“它就是中国时间”来格式化展示
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
 
 @app.on_event("startup")
 def startup():
     Base.metadata.create_all(bind=engine)
-    # ✅ 启动时确保 Stream key 存在（没有也不影响启动）
     try:
         ensure_streams()
     except Exception:
@@ -49,7 +66,8 @@ def startup():
 
 @app.get("/health")
 def health():
-    return {"ok": True, "time": datetime.utcnow().isoformat()}
+    # ✅ 健康检查也返回中国时间，避免你调试时混淆
+    return {"ok": True, "time": now_cn().strftime("%Y-%m-%d %H:%M:%S")}
 
 
 # -----------------------------
@@ -68,7 +86,12 @@ def debug_redis():
 # Ingest
 # -----------------------------
 @app.post("/ingest")
-def ingest(payload: IngestLogIn, db: Session = Depends(get_db)):
+def ingest(
+    payload: IngestLogIn,
+    db: Session = Depends(get_db),
+    debug: bool = Query(False, description="调试模式：返回 parsed/alert_data，便于定位为何不出告警"),
+):
+    # ✅ 不手动传 created_at，让 models.py 的 default（中国时间）生效
     row = RawLog(
         source=payload.source,
         host=payload.host,
@@ -88,17 +111,67 @@ def ingest(payload: IngestLogIn, db: Session = Depends(get_db)):
                 "host": row.host,
                 "level": row.level,
                 "message": row.message,
-                "created_at": row.created_at.isoformat() if getattr(row, "created_at", None) else "",
+                # ✅ 直接推送中国时间字符串
+                "created_at": fmt_cn(getattr(row, "created_at", None)),
             }
         )
     except Exception:
         pass
 
-    # 解析 + 检测
-    parsed = parse_ssh_failed(row.message)
+    # -----------------------------
+    # ✅ 解析 + 检测（关键定位点）
+    # -----------------------------
+    msg = row.message or ""
+    needle = "Failed password"
+    idx = msg.find(needle)
+    norm_msg = msg[idx:] if idx >= 0 else msg  # 兼容前缀带 TAG 的情况
+
+    parsed = None
+    alert_data = None
+    detector_error = None
+
+    try:
+        parsed = parse_ssh_failed(norm_msg)
+    except Exception as e:
+        # parse 本身报错
+        if debug:
+            return {
+                "ok": True,
+                "id": row.id,
+                "parsed": False,
+                "error": f"parse_error: {repr(e)}",
+                "norm_msg": norm_msg[:300],
+            }
+        return {"ok": True, "id": row.id}
+
     if parsed:
-        alert_data = detect_ssh_bruteforce(parsed)
+        # 给 parsed 塞 host/source，避免 detector 聚合缺字段
+        if isinstance(parsed, dict):
+            parsed.setdefault("host", row.host)
+            parsed.setdefault("source", row.source)
+        else:
+            try:
+                if not getattr(parsed, "host", None):
+                    setattr(parsed, "host", row.host)
+            except Exception:
+                pass
+            try:
+                if not getattr(parsed, "source", None):
+                    setattr(parsed, "source", row.source)
+            except Exception:
+                pass
+
+        # detector 可能需要 db（用窗口查库计数），优先 detect(parsed, db)
+        try:
+            alert_data = detect_ssh_bruteforce(parsed, db)
+        except TypeError:
+            # 兼容 detector 只收一个参数的写法
+            alert_data = detect_ssh_bruteforce(parsed)
+        except Exception as e:
+            detector_error = repr(e)
+
         if alert_data:
+            # ✅ 同理：不手动传 created_at，让 models default 生效
             alert = Alert(
                 alert_type=alert_data["alert_type"],
                 severity=alert_data["severity"],
@@ -123,11 +196,38 @@ def ingest(payload: IngestLogIn, db: Session = Depends(get_db)):
                         "count": str(alert.count),
                         "window_seconds": str(alert.window_seconds),
                         "evidence": alert.evidence,
-                        "created_at": alert.created_at.isoformat() if getattr(alert, "created_at", None) else "",
+                        # ✅ 直接推送中国时间字符串
+                        "created_at": fmt_cn(getattr(alert, "created_at", None)),
                     }
                 )
             except Exception:
                 pass
+
+            # debug 模式：把 alert_id 也返回，便于你立刻确认 DB 新增
+            if debug:
+                return {
+                    "ok": True,
+                    "id": row.id,
+                    "parsed": True,
+                    "alerted": True,
+                    "alert_id": alert.id,
+                    "norm_msg": norm_msg[:300],
+                    "parsed_obj": parsed,
+                    "alert_data": alert_data,
+                }
+
+    # debug 模式：明确告诉你到底卡在哪一步
+    if debug:
+        return {
+            "ok": True,
+            "id": row.id,
+            "parsed": bool(parsed),
+            "alerted": bool(alert_data),
+            "detector_error": detector_error,
+            "norm_msg": norm_msg[:300],
+            "parsed_obj": parsed,
+            "alert_data": alert_data,
+        }
 
     return {"ok": True, "id": row.id}
 
@@ -175,7 +275,8 @@ def list_recent_logs(
             host=x.host,
             level=x.level,
             message=x.message,
-            created_at=x.created_at.isoformat() if getattr(x, "created_at", None) else None,
+            # ✅ 统一返回中国时间字符串
+            created_at=fmt_cn(getattr(x, "created_at", None)) if getattr(x, "created_at", None) else None,
         )
         for x in rows
     ]
@@ -195,7 +296,8 @@ def list_alerts(limit: int = 50, db: Session = Depends(get_db)):
             count=a.count,
             window_seconds=a.window_seconds,
             evidence=a.evidence,
-            created_at=a.created_at.isoformat() if getattr(a, "created_at", None) else "",
+            # ✅ 统一返回中国时间字符串
+            created_at=fmt_cn(getattr(a, "created_at", None)),
         )
         for a in rows
     ]
@@ -219,11 +321,6 @@ async def _send_safe(ws: WebSocket, payload: dict) -> bool:
 
 
 def _stream_latest_id(key: str) -> str:
-    """
-    ✅ 关键：获取 Stream 当前最新 entry_id
-    - 没有数据：返回 "0-0"
-    - 有数据：返回最新一条 id
-    """
     r = get_redis()
     try:
         items = r.xrevrange(key, count=1)
@@ -245,8 +342,6 @@ async def _latest_id_threadsafe(key: str) -> str:
 @app.websocket("/ws/logs")
 async def ws_logs(ws: WebSocket):
     await ws.accept()
-
-    # ✅ 起点：以“当前stream最新id”为基准，只收之后新增的
     last_id = await _latest_id_threadsafe(RAWLOG_STREAM_KEY)
 
     try:
@@ -288,7 +383,6 @@ async def ws_logs(ws: WebSocket):
 @app.websocket("/ws/alerts")
 async def ws_alerts(ws: WebSocket):
     await ws.accept()
-
     last_id = await _latest_id_threadsafe(ALERT_STREAM_KEY)
 
     try:

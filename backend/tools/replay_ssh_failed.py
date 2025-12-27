@@ -33,4 +33,4 @@ if __name__ == "__main__":
         }
         code, text = post_with_retry(payload, retries=3, timeout=30)
         print(idx, code, text)
-        time.sleep(0.2)
+        #time.sleep(0.2)
