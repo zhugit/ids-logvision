@@ -1,0 +1,244 @@
+:root{
+  /* 亮一点的深色基底（不再“纯黑”） */
+  --bg:  #0f172a;     /* slate-900 */
+  --bg2: #0b1222;     /* slightly darker */
+  --panel:#111c33;
+
+  /* 玻璃卡片更通透 */
+  --card:  rgba(255,255,255,.08);
+  --card2: rgba(255,255,255,.11);
+  --border: rgba(255,255,255,.14);
+
+  --text: rgba(255,255,255,.92);
+  --muted: rgba(255,255,255,.68);
+  --muted2: rgba(255,255,255,.52);
+
+  --primary:#8b5cf6;
+  --cyan:#22d3ee;
+  --green:#22c55e;
+  --amber:#f59e0b;
+  --red:#ef4444;
+
+  --shadow: 0 26px 70px rgba(0,0,0,.28);
+  --shadow2: 0 14px 36px rgba(0,0,0,.22);
+
+  --radius: 16px;
+  --radius2: 12px;
+}
+
+*{ box-sizing:border-box; }
+html,body{ height:100%; }
+body{
+  margin:0;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+  "PingFang SC","Microsoft YaHei","Helvetica Neue", Arial;
+
+  /* ⭐ 明显提亮版背景（你一眼就能看出来） */
+  background:
+    radial-gradient(1400px 900px at 20% 12%, rgba(139,92,246,.38), transparent 65%),
+    radial-gradient(1200px 800px at 78% 8%, rgba(34,211,238,.30), transparent 62%),
+    radial-gradient(1000px 700px at 60% 78%, rgba(34,197,94,.22), transparent 60%),
+    linear-gradient(180deg, #1e2a4a, #0f1a30);
+
+  color: var(--text);
+}
+
+a{ color: inherit; text-decoration:none; }
+
+.mono{
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;
+  font-size: 12px;
+}
+
+.container{
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+/* ✅ 卡片更亮、更玻璃 */
+.card{
+  background: linear-gradient(180deg, rgba(255,255,255,.10), rgba(255,255,255,.06));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow2);
+  backdrop-filter: blur(12px);
+}
+
+.card-inner{
+  padding: 16px 18px;
+}
+
+.h1{
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: .2px;
+  margin: 0;
+}
+.sub{
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* ✅ 按钮更亮一点 */
+.btn{
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,.16);
+  background: rgba(255,255,255,.10);
+  color: var(--text);
+  cursor: pointer;
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  transition: all .18s ease;
+}
+.btn:hover{
+  transform: translateY(-1px);
+  background: rgba(255,255,255,.14);
+  box-shadow: 0 12px 28px rgba(0,0,0,.22);
+}
+
+.pill{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,.16);
+  background: rgba(255,255,255,.10);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.badge{
+  display:inline-flex;
+  align-items:center;
+  height: 22px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-weight: 800;
+  font-size: 12px;
+  border: 1px solid transparent;
+}
+
+/* ✅ badge 更清晰但不刺眼 */
+.badge-high{
+  background: rgba(239,68,68,.18);
+  border-color: rgba(239,68,68,.42);
+  color: #ffd1d1;
+}
+.badge-medium{
+  background: rgba(245,158,11,.18);
+  border-color: rgba(245,158,11,.40);
+  color: #ffe3b3;
+}
+.badge-low{
+  background: rgba(34,197,94,.16);
+  border-color: rgba(34,197,94,.38);
+  color: #c9f7d8;
+}
+.badge-info{
+  background: rgba(34,211,238,.16);
+  border-color: rgba(34,211,238,.40);
+  color: #c9fbff;
+}
+.badge-warn{
+  background: rgba(245,158,11,.18);
+  border-color: rgba(245,158,11,.40);
+  color: #ffe3b3;
+}
+.badge-error{
+  background: rgba(239,68,68,.18);
+  border-color: rgba(239,68,68,.42);
+  color: #ffd1d1;
+}
+
+/* ✅ 表格更亮更舒服 */
+.table{
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.table thead th{
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  text-align: left;
+  font-size: 12px;
+  color: rgba(255,255,255,.72);
+
+  /* 表头不要太黑 */
+  background: rgba(15,23,42,.78);
+  backdrop-filter: blur(10px);
+
+  padding: 12px 12px;
+  border-bottom: 1px solid rgba(255,255,255,.10);
+}
+
+.table tbody td{
+  padding: 12px 12px;
+  border-bottom: 1px solid rgba(255,255,255,.08);
+  vertical-align: top;
+  font-size: 13px;
+  color: rgba(255,255,255,.88);
+}
+
+.table tbody tr{
+  transition: background .15s ease;
+}
+.table tbody tr:hover{
+  background: rgba(255,255,255,.07);
+}
+
+.kbd{
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,.18);
+  background: rgba(255,255,255,.10);
+  color: rgba(255,255,255,.72);
+}
+
+/* ✅ 弹窗也更亮一点 */
+.modal-mask{
+  position: fixed;
+  inset: 0;
+  background: rgba(2,6,23,.55);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding: 24px;
+  z-index: 999;
+}
+.modal{
+  width: min(980px, 96vw);
+  max-height: 84vh;
+  overflow:auto;
+  border-radius: var(--radius);
+  border: 1px solid rgba(255,255,255,.16);
+  background: rgba(15,23,42,.90);
+  backdrop-filter: blur(14px);
+  box-shadow: var(--shadow);
+}
+.modal-head{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(255,255,255,.10);
+}
+.modal-title{
+  font-weight: 900;
+}
+.modal-body{
+  padding: 14px 16px;
+}
+pre{
+  margin:0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: rgba(255,255,255,.90);
+}

@@ -1,0 +1,9 @@
+POST http://localhost:8000/ingest
+Content-Type: application/json
+
+{
+  "source": "test",
+  "host": "pc",
+  "level": "INFO",
+  "message": "second log test"
+}
