@@ -125,6 +125,21 @@
           </div>
         </div>
 
+        <!-- ✅ 处置建议 -->
+        <div class="card-lite">
+          <div class="section-title">处置建议</div>
+
+          <div v-if="modal.recommendations.length === 0" class="empty small">
+            暂无处置建议（recommendations_cn 为空）
+          </div>
+
+          <ul v-else class="advice">
+            <li v-for="(r, i) in modal.recommendations" :key="i">
+              {{ r }}
+            </li>
+          </ul>
+        </div>
+
         <!-- ✅ 证据列表（表格化） -->
         <div class="card-lite">
           <div class="section-title">证据列表（最近 {{ modal.items.length }} 条）</div>
@@ -222,6 +237,7 @@ const modal = reactive({
   pretty: "",
   showRaw: false,
   items: [] as EvidenceItem[],
+  recommendations: [] as string[],
   summary: {
     typeText: "",
     attackIp: "",
@@ -245,6 +261,48 @@ function toArrayEvidence(ev: any): EvidenceItem[] {
   if (Array.isArray(ev)) return ev as EvidenceItem[];
   if (typeof ev === "object") return [ev as EvidenceItem];
   return [];
+}
+
+function pickEvidenceItems(ev: any): EvidenceItem[] {
+  // 兼容：
+  // - ev = { events: [...] }
+  // - ev = [...]
+  // - ev = { ... } 单条
+  if (!ev) return [];
+  if (typeof ev === "object" && !Array.isArray(ev)) {
+    if (Array.isArray((ev as any).events)) return (ev as any).events as EvidenceItem[];
+  }
+  return toArrayEvidence(ev);
+}
+
+function pickRecommendations(ev: any, a: AlertRow): string[] {
+  // 优先用后端 recommendations_cn
+  if (ev && typeof ev === "object" && !Array.isArray(ev)) {
+    const r = (ev as any).recommendations_cn;
+    if (Array.isArray(r)) return r.map((x: any) => String(x));
+  }
+
+  // 没有的话给一个“规则兜底版”
+  const type = (a.alert_type || "").toUpperCase();
+  const ip = a.attack_ip || "";
+  const host = a.host || "";
+  const port = "22";
+
+  if (type.includes("SSH_BRUTEFORCE")) {
+    return [
+      `建议临时封禁攻击 IP：${ip || "（未知）"}（防火墙 / 安全组 / fail2ban）`,
+      `检查目标主机 ${host || "（未知）"} 是否存在弱口令账户（如 root/admin/test），必要时强制改密`,
+      `建议关闭 SSH 密码登录，启用密钥认证（PasswordAuthentication no）`,
+      `限制 ${port} 端口访问来源（仅允许运维出口 IP），或改为非默认端口并配合 VPN/MFA`,
+      `回溯同时间段日志：是否存在同源 IP 的横向尝试/扫描行为`,
+    ];
+  }
+
+  return [
+    "建议确认告警是否为误报：结合源 IP、时间段、业务访问特征进行判断",
+    "对同源 IP 的后续请求进行限速/封禁，并加强审计留痕",
+    "根据告警类型检查对应服务配置与补丁状态，必要时进行加固",
+  ];
 }
 
 function fmtTs(ts: any) {
@@ -296,9 +354,14 @@ function openEvidence(a: AlertRow){
   modal.showRaw = false;
 
   const ev = normalizeEvidence(a.evidence);
-  modal.items = toArrayEvidence(ev);
 
-  // 原始 JSON 仍然保留，方便复制
+  // ✅ 证据条目：优先 events
+  modal.items = pickEvidenceItems(ev);
+
+  // ✅ 处置建议：优先 recommendations_cn，没给就兜底
+  modal.recommendations = pickRecommendations(ev, a);
+
+  // ✅ 原始 JSON 仍然保留，方便复制
   modal.pretty = JSON.stringify(ev, null, 2);
 
   // ✅ 构建中文摘要
@@ -482,5 +545,16 @@ onUnmounted(() => {
   border-radius: 12px;
   background: rgba(0,0,0,.18);
   border: 1px solid rgba(255,255,255,.08);
+}
+
+/* ✅ 处置建议样式 */
+.advice{
+  padding-left: 18px;
+  margin: 0;
+}
+.advice li{
+  margin: 6px 0;
+  line-height: 1.55;
+  color: rgba(255,255,255,.90);
 }
 </style>
