@@ -1,0 +1,25 @@
+id: SSH_FAIL_TO_SUCCESS
+name: SSH 爆破后成功登录
+desc: >
+  同一 src_ip + username 在 300 秒内失败次数 ≥ 5，并在随后 60 秒内出现一次 success，判定为“爆破后成功登录”。
+why: >
+  失败突增后紧接成功通常意味着口令被猜中或撞库命中；按用户+来源聚合并设置 600 秒冷却，避免重复告警刷屏。
+advice:
+  - 立即确认该次 success 是否为真实入侵：核对登录时间、登录来源 IP、登录账号、登录后执行的命令/会话行为。
+  - 立刻处置账号：对该 username 强制改密、下线所有会话/令牌，必要时临时禁用账号并检查是否被提权/加组。
+  - 封禁攻击源：对 src_ip 做封禁或限速（防火墙/安全组/WAF/IPS），并关注是否存在换 IP 继续尝试。
+  - 排查横向与持久化：检查是否新增用户/SSH key、计划任务、后门进程、异常端口监听；必要时做主机隔离与取证。
+  - 加固登录策略：关闭密码登录改用密钥认证，启用 MFA/堡垒机，限制 SSH 仅允许运维网段访问。
+  - 追溯同源行为：查看该 src_ip 在 success 前后的扫描/爆破/登录记录，确认是否为撞库（同账号多系统命中）。
+enabled: true
+log_source: ssh
+group_by: [src_ip, username]
+sequence:
+  fail_count: 5
+  fail_within_sec: 300
+  success_within_sec: 60
+severity: CRITICAL
+cooldown_sec: 600
+dedup_key: "{rule_id}:{src_ip}:{username}"
+tags: [T1078, valid_accounts]
+require: [src_ip, username]

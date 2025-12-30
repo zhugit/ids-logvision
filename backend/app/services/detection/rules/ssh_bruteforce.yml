@@ -1,0 +1,25 @@
+id: SSH_BRUTE_FORCE
+name: SSH 暴力破解
+desc: >
+  同一来源 IP（src_ip）在 60 秒窗口内出现 ≥5 次 SSH 登录失败（outcome=fail），判定为 SSH 暴力破解行为。
+why: >
+  暴力破解通常体现为短时间内高频失败尝试；该规则按 src_ip 聚合计数并设置 300 秒冷却，避免重复刷屏告警。
+advice:
+  - 先确认是否为正常运维误输密码：核对该 src_ip 是否为堡垒机/运维出口 IP，必要时加入白名单。
+  - 若非可信来源，立即对该 src_ip 做临时封禁（防火墙/安全组/fail2ban），并观察是否继续更换 IP 扫描。
+  - 检查目标主机是否存在弱口令与高风险账号（root/admin/test 等），对可疑账号强制改密并启用复杂度策略。
+  - 建议关闭 SSH 密码登录，改用密钥认证（PasswordAuthentication no），必要时结合 MFA/堡垒机登录。
+  - 限制 22 端口暴露面：仅允许运维网段访问；可考虑改非默认端口并配合端口敲门/内网 VPN。
+  - 回溯同时间段日志：关注同源 IP 的横向尝试、目录扫描、提权行为；必要时做主机基线排查。
+enabled: true
+log_source: ssh
+match:
+  outcome: fail
+group_by: [src_ip]
+window_sec: 60
+threshold: 5
+severity: HIGH
+cooldown_sec: 300
+dedup_key: "{rule_id}:{src_ip}"
+tags: [T1110, brute_force]
+require: [src_ip]

@@ -53,37 +53,25 @@
 
 <script setup lang="ts">
 import { onMounted, onUnmounted } from "vue";
-import { getWsChannel } from "@/api/ws";
 import { idsStore as store } from "@/store/ids";
 
-// ✅ 改法二：WS 在 Layout 常驻，切换页面不断开
-const chLogs = getWsChannel("/ws/logs");
-const chAlerts = getWsChannel("/ws/alerts");
-
-let offLogsStatus: null | (() => void) = null;
-let offAlertsStatus: null | (() => void) = null;
-
+/**
+ * ✅ 最佳做法：Layout 只负责“启动全局常驻实时模块”
+ * - WS 的 acquire / subscribeJson / subscribeStatus 全部由 store.startRealtime() 统一管理
+ * - 页面切换不会影响 WS 消费
+ */
 onMounted(() => {
-  // Layout 一挂载就 acquire：保持连接常驻
-  chLogs.acquire();
-  chAlerts.acquire();
-
-  // ✅ 把 channel 状态同步给 store（页面不刷新也能实时显示）
-  offLogsStatus = chLogs.subscribeStatus((s) => {
-    store.wsLogs = s as any;
-  });
-  offAlertsStatus = chAlerts.subscribeStatus((s) => {
-    store.wsAlerts = s as any;
-  });
+  store.startRealtime();
 });
 
 onUnmounted(() => {
-  // Layout 一般不会卸载，但保留释放逻辑以防热更新/路由结构变化
-  offLogsStatus?.(); offLogsStatus = null;
-  offAlertsStatus?.(); offAlertsStatus = null;
-
-  chLogs.release();
-  chAlerts.release();
+  /**
+   * Layout 一般不会卸载（除非热更新/路由结构变动）
+   * 保留 stopRealtime 以防你调试时出现“重复订阅”：
+   * - 你想彻底关闭 WS 时可以打开这一行
+   * - 正常生产建议不关，让它常驻
+   */
+  // store.stopRealtime();
 });
 </script>
 

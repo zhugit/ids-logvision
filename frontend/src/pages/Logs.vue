@@ -124,7 +124,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { idsStore as store } from "@/store/ids";
-import { getWsChannel } from "@/api/ws";
 
 type LogRow = {
   id: number;
@@ -155,12 +154,6 @@ const hf = reactive({
 // ✅ 后端 base url（如果你有 http.ts，也可以改成从那边走）
 const API_BASE = "http://localhost:8000";
 
-// WS channel（实时：只订阅推送）
-const ch = getWsChannel("/ws/logs");
-
-let offStatus: null | (() => void) = null;
-let offJson: null | (() => void) = null;
-
 function wsText(s: string){
   if (s === "connected") return "已连接";
   if (s === "connecting") return "连接中";
@@ -176,14 +169,16 @@ function levelClass(lv: string){
   if (v.includes("WARN")) return "badge-warn";
   return "badge-info";
 }
+
+// ✅ 改：走 store 的统一入口
 function clear(){
-  store.logs.length = 0;
+  store.clearLogs();
 }
 
 const filtered = computed(() => {
   const s = q.value.trim().toLowerCase();
   if (!s) return store.logs;
-  return store.logs.filter((x) => {
+  return store.logs.filter((x: any) => {
     const blob = `${x.source} ${x.host} ${x.level} ${x.message}`.toLowerCase();
     return blob.includes(s);
   });
@@ -213,8 +208,10 @@ function resetHistory(){
 }
 
 function _minId(rows: LogRow[]): number | null {
-  if (!rows.length) return null;
-  let m = Number(rows[0].id);
+  const first = rows.length ? rows[0] : undefined;
+  if (!first) return null;
+
+  let m = Number(first.id);
   for (const r of rows) m = Math.min(m, Number(r.id));
   return Number.isFinite(m) ? m : null;
 }
@@ -290,14 +287,16 @@ async function loadMore(){
   await queryHistory(false);
 }
 
-// ✅ 回放到实时：插入顶部，并裁剪到 logsMax（不会自动触发，只有你点按钮才会）
+// ✅ 改：回放到实时也走 store.pushLog（不绕过上限/未来逻辑）
+// 由于 pushLog 是 unshift，想保持历史原顺序插到顶部，需要倒序 push
 function replayToLive(){
   if (!historyRows.value.length) return;
+
   const copy = [...historyRows.value];
-  store.logs.unshift(...copy);
-  if (store.logs.length > store.logsMax){
-    store.logs.splice(store.logsMax);
+  for (let i = copy.length - 1; i >= 0; i--) {
+    store.pushLog(copy[i] as any);
   }
+
   historyOpen.value = false;
 }
 
@@ -314,38 +313,13 @@ watch(historyOpen, (open) => {
   document.body.style.overflow = open ? "hidden" : "";
 });
 
-// --------------------
-// WS 订阅（实时 ONLY）
-// --------------------
 onMounted(() => {
   window.addEventListener("keydown", onKeydown);
-
-  offStatus = ch.subscribeStatus((s) => {
-    store.wsLogs = s;
-  });
-
-  offJson = ch.subscribeJson((msg) => {
-    if (msg?.type === "ping") return;
-    if (msg?.type !== "log" || !msg?.data) return;
-
-    const d = msg.data;
-    store.pushLog({
-      id: Number(d.id ?? Date.now()),
-      source: d.source ?? "-",
-      host: d.host ?? "-",
-      level: d.level ?? "INFO",
-      message: d.message ?? "",
-      created_at: d.created_at ?? "",
-    });
-  });
 });
 
 onUnmounted(() => {
   window.removeEventListener("keydown", onKeydown);
   document.body.style.overflow = "";
-
-  offStatus?.(); offStatus = null;
-  offJson?.(); offJson = null;
 });
 </script>
 
