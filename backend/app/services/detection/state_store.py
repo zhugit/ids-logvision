@@ -4,6 +4,7 @@ import json
 from typing import Any, Dict, List, Optional, Tuple
 
 import redis
+import time
 
 
 class StateStore:
@@ -160,12 +161,30 @@ class StateStore:
     # ----------------------------
     def cooldown_hit(self, dedup_key: str, cooldown_sec: int) -> bool:
         """
-        True 代表“允许触发”（首次设置成功）
-        False 代表“处于冷却中”（已存在）
+        True  = 允许触发告警
+        False = 处于冷却期内，禁止触发
         """
+        # ✅ 0 或负数：不启用冷却，永远允许
+        if cooldown_sec <= 0:
+            return True
+
         k = self._k("cd", dedup_key)
-        ok = self.r.set(k, "1", nx=True, ex=cooldown_sec)
-        return bool(ok)
+        now = int(time.time())
+
+        last = self.r.get(k)
+        if last is None:
+            # 从未触发过：允许，并记录时间
+            self.r.set(k, now, ex=cooldown_sec)
+            return True
+
+        last_ts = int(last)
+        if now - last_ts < cooldown_sec:
+            # 仍在冷却期
+            return False
+
+        # 冷却期已过：更新时间，允许
+        self.r.set(k, now, ex=cooldown_sec)
+        return True
 
     # ----------------------------
     # for fail->success 简化序列

@@ -1,0 +1,33 @@
+id: HTTP_PATH_BRUTEFORCE
+name: HTTP 路径枚举扫描
+title: HTTP 路径爆破 / 目录扫描
+enabled: true
+severity: MEDIUM
+log_source: http
+
+require:
+  - src_ip
+  - path
+
+group_by:
+  - src_ip
+  - host
+
+distinct_on:
+  - path
+
+threshold: 8
+window_sec: 60
+cooldown_sec: 300
+
+dedup_key: "{rule_id}:{src_ip}:{host}"
+
+desc: >
+  检测同一 IP 在短时间内请求多个不同 URL 路径，疑似目录枚举或扫描行为。
+
+why: >
+  攻击者通常通过工具批量请求常见路径以发现敏感接口或后台页面。
+
+advice:
+  - 分析请求路径是否包含敏感接口
+  - 可结合 WAF 对异常路径请求进行速率限制

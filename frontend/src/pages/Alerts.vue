@@ -55,13 +55,13 @@
             <td class="mono">{{ typeToCN(a.alert_type) }}</td>
 
             <td>
-                <span class="badge" :class="sevClass(a.severity)">
-                  {{ sevToCN(a.severity) }}
-                </span>
+              <span class="badge" :class="sevClass(a.severity)">
+                {{ sevToCN(a.severity) }}
+              </span>
             </td>
 
             <td class="mono">{{ a.attack_ip }}</td>
-            <td class="mono">{{ a.host }}</td>
+            <td class="mono">{{ displayTargetHost(a) }}</td>
             <td class="mono">{{ a.count }}</td>
             <td class="mono">{{ a.window_seconds }}</td>
             <td>
@@ -93,6 +93,7 @@
       </div>
 
       <div class="modal-body">
+        <!-- ✅ 一眼看懂（产品级） -->
         <div class="summary card-lite">
           <div class="summary-title">一眼看懂</div>
           <div class="summary-grid">
@@ -109,6 +110,10 @@
               <div class="v mono">{{ modal.summary.host || "-" }}</div>
             </div>
             <div class="kv">
+              <div class="k">目标资产</div>
+              <div class="v mono muted">{{ modal.summary.internalHost || "-" }}</div>
+            </div>
+            <div class="kv">
               <div class="k">尝试次数</div>
               <div class="v mono">{{ modal.summary.countText }}</div>
             </div>
@@ -120,9 +125,66 @@
               <div class="k">端口</div>
               <div class="v mono">{{ modal.summary.port || "-" }}</div>
             </div>
+
+            <!-- ✅ 必须：完整目标 URL 列表 -->
+            <div class="kv wide">
+              <div class="k">涉及目标 URL</div>
+              <div class="v">
+                <!-- ✅ 新版：结构化 target_urls（带语义 + 是否存在） -->
+                <div v-if="modal.summary.targetUrls && modal.summary.targetUrls.length" class="targets2">
+                  <div v-for="(t, i) in visibleTargetUrls" :key="i" class="trow" :class="trowClass(t)">
+                  <div class="line1">
+                      <span class="mono path">{{ t.path || t.url }}</span>
+                      <span v-if="t.tag" class="pill-tag">{{ t.tag }}</span>
+
+                      <span class="pill-exist" :class="existsClass(t.exists)">
+        {{ existsText(t.exists) }}
+      </span>
+
+                    <span v-if="t.status !== null && t.status !== undefined" class="pill-status" :class="statusClass(t.status)">
+  {{ statusText(t.status) }}
+</span>
+                    </div>
+
+                    <div class="line2 mono muted" v-if="t.url">
+                      {{ t.url }}
+                    </div>
+                  </div>
+                </div>
+
+                <!-- ✅ targets 折叠 / 展开 -->
+                <div
+                  v-if="hiddenTargetCount > 0 || ui.targetsExpanded"
+                  class="targets-toggle"
+                >
+                  <button
+                    class="btn ghost mini-toggle"
+                    @click="ui.targetsExpanded = !ui.targetsExpanded"
+                  >
+                    {{ ui.targetsExpanded ? "收起" : `展开全部（+${hiddenTargetCount}）` }}
+                  </button>
+                </div>
+
+                <!-- ✅ 兼容旧版：只有 targets:string[] -->
+                <div v-else-if="modal.summary.targets.length" class="targets">
+                  <ul class="targets">
+                    <li v-for="(u, i) in modal.summary.targets" :key="i">
+                      <span class="mono url">{{ u }}</span>
+                    </li>
+                  </ul>
+                </div>
+
+                <div v-else class="muted">
+                  -（当前证据未提供 targets/target_urls，检查后端 alert_builder.py 是否已输出 assessment.targets/assessment.target_urls）
+                </div>
+              </div>
+            </div>
+
             <div class="kv wide">
               <div class="k">描述</div>
-              <div class="v">{{ modal.summary.desc }}</div>
+              <div class="v">
+                {{ (modal as any).human || modal.summary.desc }}
+              </div>
             </div>
           </div>
         </div>
@@ -162,8 +224,8 @@
             <tr v-for="(it, idx) in modal.items" :key="idx" class="row">
               <td class="mono muted">{{ fmtTs(it.ts) }}</td>
               <td class="mono">{{ it.attack_ip || it.ip || "-" }}</td>
-              <td class="mono">{{ it.user || "-" }}</td>
-              <td class="mono">{{ it.port || "-" }}</td>
+              <td class="mono">{{ showUser(it) }}</td>
+              <td class="mono">{{ showPort(it) }}</td>
               <td class="mono wrap">{{ it.raw || "-" }}</td>
             </tr>
             </tbody>
@@ -214,6 +276,9 @@ const ALERT_TYPE_CN: Record<string, string> = {
   SSH_BRUTE_FORCE: "SSH 爆破",
   SSH_PASSWORD_SPRAY: "SSH 密码喷洒",
   SSH_FAIL_TO_SUCCESS: "爆破后成功登录",
+  HTTP_PATH_BRUTEFORCE: "Web 敏感路径扫描",
+  HTTP_SCAN: "Web 扫描行为",
+  HTTP_ADMIN_SCAN: "后台入口探测",
 };
 
 function stripRulePrefix(t: string) {
@@ -271,6 +336,15 @@ type EvidenceItem = {
   [k: string]: any;
 };
 
+type TargetUrl = {
+  url: string;
+  path?: string;
+  tag?: string;
+  exists?: boolean | null;
+  status?: number | null;
+  note?: string;
+};
+
 const modal = reactive({
   open: false,
   alertId: 0,
@@ -278,16 +352,116 @@ const modal = reactive({
   showRaw: false,
   items: [] as EvidenceItem[],
   recommendations: [] as string[],
+  human: "",
   summary: {
     typeText: "",
     attackIp: "",
     host: "",
+    internalHost: "",
     user: "",
     port: "",
     countText: "",
     desc: "",
+    targets: [] as string[],
+    targetUrls: [] as TargetUrl[],
   },
 });
+
+// ✅ targets 折叠：默认最多展示 8 条
+const TARGETS_PREVIEW_LIMIT = 2;
+
+const ui = reactive({
+  targetsExpanded: false,
+});
+
+const visibleTargetUrls = computed(() => {
+  const arr = modal.summary.targetUrls || [];
+  if (ui.targetsExpanded) return arr;
+  return arr.slice(0, TARGETS_PREVIEW_LIMIT);
+});
+
+const hiddenTargetCount = computed(() => {
+  const n = (modal.summary.targetUrls || []).length - (visibleTargetUrls.value || []).length;
+  return n > 0 ? n : 0;
+});
+
+function isSshAlert(a: AlertRow, ev?: any) {
+  const t = String(a?.alert_type || "").toUpperCase();
+  if (t.includes("SSH")) return true;
+  const ls = String(ev?.log_source || "").toLowerCase();
+  return ls === "ssh";
+}
+
+function inferPublicHost(a: AlertRow, ev?: any): string {
+  // ✅ 1) evidence.asset.public_host（最权威）
+  const ph = ev?.asset?.public_host;
+  if (typeof ph === "string" && ph.trim()) return ph.trim();
+
+  // ✅ 2) HTTP/WEB 才允许用 a.host 当公网域名；SSH 禁止（否则就会出现 ssh://zmqzmq.cn:22）
+  if (!isSshAlert(a, ev)) {
+    const h = (a as any)?.host;
+    if (typeof h === "string" && h.trim()) return h.trim();
+  }
+
+  // ✅ 3) 兜底：如果 targets 里有完整URL，解析 host（主要服务于 HTTP）
+  const targets = ev?.assessment?.targets || ev?.targets || [];
+  if (Array.isArray(targets) && targets.length) {
+    try {
+      const u = new URL(String(targets[0]));
+      return u.host || u.hostname || "";
+    } catch {}
+  }
+
+  return "";
+}
+
+function inferInternalHost(a: AlertRow, ev?: any, items?: EvidenceItem[]): string {
+  // 1) 最权威：evidence.asset.internal_host
+  const ih = ev?.asset?.internal_host;
+  if (typeof ih === "string" && ih.trim()) return ih.trim();
+
+  // 2) 其次：evidence.internal_host
+  const ih2 = ev?.internal_host;
+  if (typeof ih2 === "string" && ih2.trim()) return ih2.trim();
+
+  // ✅ 3) SSH 规则聚合后常见：evidence.host = "server2"
+  const ih3 = ev?.host;
+  if (typeof ih3 === "string" && ih3.trim()) return ih3.trim();
+
+  // 4) 再兜底：events[0].host
+  if (Array.isArray(items) && items.length) {
+    const h4 = (items[0] as any)?.host;
+    if (typeof h4 === "string" && h4.trim()) return h4.trim();
+  }
+
+  // 5) 最后：a.host 只有在“看起来像内部名”时才当 internal（不含点更像 server2/web-01）
+  const rawHost = String((a as any)?.host || "").trim();
+  if (rawHost && !rawHost.includes(".")) return rawHost;
+
+  return "";
+}
+
+function displayTargetHost(a: AlertRow): string {
+  const ev = normalizeEvidence((a as any).evidence);
+  const items = pickEvidenceItems(ev);
+
+  const pub = inferPublicHost(a, ev);                 // HTTP: zmqzmq.cn
+  const internal = inferInternalHost(a, ev, items);   // SSH: server2 / web-01
+
+  const ssh = isSshAlert(a, ev);
+
+  if (ssh) {
+    // ✅ SSH：主显示资产主机（server2），括号可选显示对外标识（如果你后端真的给了 public_host）
+    const main = internal || pub || "-";
+    const sub = internal && pub && pub !== internal ? pub : "";
+    return sub ? `${main} (${sub})` : main;
+  }
+
+  // ✅ HTTP：主显示域名（站点），括号显示内部资产（web-01）可选
+  const main = pub || internal || "-";
+  const sub = internal && pub && internal !== pub ? internal : "";
+  return sub ? `${main} (${sub})` : main;
+}
 
 function normalizeEvidence(e: any) {
   try {
@@ -390,27 +564,183 @@ function inferPort(items: EvidenceItem[], fallbackRaw?: string): string {
     if (p !== null && p !== undefined && String(p).trim() !== "" && String(p) !== "null") {
       return String(p);
     }
+
     const raw = (it as any)?.raw;
     if (typeof raw === "string") {
       const m = raw.match(/\bport\s+(\d+)\b/i);
-      if (m) return m[1];
+      if (m && m[1]) return m[1];
     }
   }
+
   if (typeof fallbackRaw === "string") {
     const m = fallbackRaw.match(/\bport\s+(\d+)\b/i);
-    if (m) return m[1];
+    if (m && m[1]) return m[1];
   }
+
   return "";
 }
 
-function shortIpTag(ip?: string) {
-  return ip || "";
+function showPort(it: EvidenceItem): string {
+  // 1) 证据里本来就有 port
+  const p = (it as any)?.port;
+  if (p !== null && p !== undefined && String(p).trim() && String(p) !== "null") {
+    return String(p);
+  }
+
+  // 2) 从 raw 里抠 "port 22"
+  const raw = String((it as any)?.raw || "");
+  const m = raw.match(/\bport\s+(\d+)\b/i);
+  if (m && m[1]) return m[1];
+
+  return "-";
+}
+
+function showUser(it: EvidenceItem): string {
+  // 1) 证据里本来就有 user
+  const u = (it as any)?.user;
+  if (typeof u === "string" && u.trim()) return u.trim();
+
+  // 2) 从 raw 里抠 ssh 用户（兼容几种常见格式）
+  const raw = String((it as any)?.raw || "");
+
+  // Failed password for invalid user root from ...
+  let m = raw.match(/\binvalid user\s+([^\s]+)\b/i);
+  if (m && m[1]) return m[1];
+
+  // Failed password for root from ...
+  m = raw.match(/\bFailed password for\s+([^\s]+)\s+from\b/i);
+  if (m && m[1]) return m[1];
+
+  // Invalid user root from ...
+  m = raw.match(/\bInvalid user\s+([^\s]+)\s+from\b/i);
+  if (m && m[1]) return m[1];
+
+  return "-";
+}
+
+function existsText(v: any): string {
+  if (v === true) return "存在";
+  if (v === false) return "不存在";
+  return "未知";
+}
+
+function existsClass(v: any): string {
+  if (v === true) return "exist-yes";
+  if (v === false) return "exist-no";
+  return "exist-unk";
+}
+
+function trowClass(t: TargetUrl) {
+  const s = Number((t as any)?.status);
+  const hasStatus = Number.isFinite(s);
+
+  // ✅ 只基于后端字段高亮，不做任何推断
+  if (t.exists === true) {
+    // 200/301/302/401/403/… 都算“存在” -> 绿色底
+    return "trow-exists";
+  }
+
+  // ✅ 服务端异常更显眼（红）
+  if (hasStatus && s >= 500) return "trow-bad";
+
+  // ✅ 需要认证 / 禁止访问：常见后台入口（黄）
+  if (hasStatus && (s === 401 || s === 403)) return "trow-warn";
+
+  // ✅ 404 / 不存在：不做任何行级样式（避免“越加越怪”）
+  return "";
+}
+
+function statusText(s: any): string {
+  const n = Number(s);
+  if (!Number.isFinite(n)) return "";
+  if (n === 200) return "200 OK";
+  if (n === 301 || n === 302) return String(n) + " 重定向";
+  if (n === 401) return "401 需认证";
+  if (n === 403) return "403 禁止访问";
+  if (n === 404) return "404 未找到";
+  if (n >= 500) return String(n) + " 服务异常";
+  return String(n);
+}
+
+function statusClass(s: any): string {
+  const n = Number(s);
+  if (!Number.isFinite(n)) return "";
+
+  if (n >= 500) return "st-bad";          // 5xx 红
+  if (n === 401 || n === 403) return "st-warn"; // 401/403 黄
+  if (n === 404) return "st-miss";        // 404 灰
+  if (n === 301 || n === 302) return "st-move"; // 30x 蓝
+  if (n >= 200 && n < 300) return "st-ok";      // 2xx 绿
+  return "";
+}
+
+function shortPathFromUrl(u: string): string {
+  try {
+    const x = new URL(u);
+    return x.pathname || "/";
+  } catch {
+    return "/";
+  }
+}
+
+function pickTargets(ev: any, a?: AlertRow): string[] {
+  const t = String(a?.alert_type || "").toUpperCase();
+  const items = pickEvidenceItems(ev);
+
+  // ✅ HTTP：优先后端给的 assessment.targets（你图里 /admin /login 那种）
+  if (!t.includes("SSH")) {
+    const targets = ev?.assessment?.targets;
+    if (Array.isArray(targets) && targets.length) {
+      return targets.map((x: any) => String(x)).filter(Boolean);
+    }
+
+    // 没有 targets 的老数据：用 host 兜一个根 URL
+    const host = a ? (inferPublicHost(a, ev) || inferInternalHost(a, ev, items) || "unknown") : "unknown";
+    return [`http://${host}/`];
+  }
+
+  // ✅ SSH：永远用资产主机 + 端口（server2:22），不要用域名
+  const host = a ? (inferInternalHost(a, ev, items) || "unknown") : "unknown";
+  const port = String(ev?.port || (a as any)?.port || inferPort(items, (items[0] as any)?.raw) || 22);
+  return [`ssh://${host}:${port}`];
+}
+
+function pickTargetUrls(ev: any): TargetUrl[] {
+  const arr = ev?.assessment?.target_urls || ev?.assessment?.targetUrls || [];
+  if (!Array.isArray(arr) || arr.length === 0) return [];
+
+  const out: TargetUrl[] = [];
+  for (const it of arr) {
+    if (it && typeof it === "object") {
+      const url = String((it as any).url || "").trim();
+      if (!url) continue;
+      out.push({
+        url,
+        path: String((it as any).path || "").trim() || shortPathFromUrl(url),
+        tag: String((it as any).tag || "").trim(),
+        exists: (it as any).exists,
+        status: (it as any).status,
+        note: String((it as any).note || "").trim(),
+      });
+    } else if (typeof it === "string") {
+      const url = it.trim();
+      if (!url) continue;
+      out.push({ url, path: shortPathFromUrl(url), tag: "", exists: null, status: null, note: "" });
+    }
+  }
+  return out;
 }
 
 function buildSummary(a: AlertRow, items: EvidenceItem[], ev: any) {
   const first = items[0] || {};
   const attackIp = (a.attack_ip || (first as any).attack_ip || (first as any).ip || "") as string;
-  const host = (a.host || (first as any).host || "") as string;
+
+  const publicHost = inferPublicHost(a, ev) || "";
+  const internalHost = inferInternalHost(a, ev) || "";
+
+  const isSSH = String(a.alert_type || "").toUpperCase().includes("SSH");
+  const host = isSSH ? (internalHost || publicHost) : (publicHost || internalHost);
+
   const user = ((first as any).user || (ev as any)?.username || "") as string;
 
   const cnt = Number(a.count ?? items.length ?? 0);
@@ -420,57 +750,58 @@ function buildSummary(a: AlertRow, items: EvidenceItem[], ev: any) {
   const countText = win ? `${cnt} 次 / ${win} 秒` : `${cnt} 次`;
 
   const port = inferPort(items, (first as any).raw);
-
-  const { key } = stripRulePrefix(a.alert_type || "");
-  const k = (key || "").toUpperCase();
-
-  const ipTag = shortIpTag(attackIp) || "某来源 IP";
-  const hostText = host || "（未知主机）";
-  const userText = user || "（未知账号）";
   const portText = port ? String(port) : "";
 
-  // ✅ 关键修正：用户名、端口分开表达，不再出现 user@port
-  // 统一用“账号 xxx”“端口 xxx”的人话风格
+  // ✅ 1) 产品级：后端直接给的人话总结（最高优先级）
+  const backendHuman =
+    (ev && typeof ev === "object" && !Array.isArray(ev) ? (ev as any).human_summary_cn : "") ||
+    (a as any).human_summary_cn ||
+    "";
+
+  // ✅ 2) 产品级：assessment.targets（用于 HTTP/SSH 的“涉及目标 URL”）
+  const targets = pickTargets(ev, a);
+  const targetUrls = pickTargetUrls(ev);
+
+  // ✅ 3) 如果后端没给 human_summary_cn，再用前端兜底拼一个“产品口吻”的 desc
   let desc = "";
-  if (k.includes("SSH_BRUTE") || k.includes("SSH_BRUTEFORCE") || k.includes("SSH_BRUTE_FORCE")) {
-    const extras: string[] = [];
-    if (userText && userText !== "（未知账号）") extras.push(`账号 ${userText}`);
-    if (portText) extras.push(`端口 ${portText}`);
-    const extraText = extras.length ? `（${extras.join("，")}）` : "";
-
-    desc =
-      `【SSH 爆破告警】${ipTag} 正在对 ${hostText} 反复尝试登录${extraText}，` +
-      (win ? `${win} 秒内` : "短时间内") +
-      `失败 ${cnt} 次。`;
-  } else if (k.includes("SSH_PASSWORD_SPRAY")) {
-    const dc =
-      ev && typeof ev === "object" && !Array.isArray(ev) ? (ev as any).distinct_count : undefined;
-    const extras: string[] = [];
-    extras.push(dc ? `覆盖 ${dc} 个账号` : "多账号尝试");
-    if (portText) extras.push(`端口 ${portText}`);
-
-    desc = `【密码喷洒告警】${ipTag} 正在对 ${hostText} 进行 SSH 登录尝试（${extras.join("，")}）。`;
-  } else if (k.includes("SSH_FAIL_TO_SUCCESS")) {
-    const fc =
-      ev && typeof ev === "object" && !Array.isArray(ev) ? (ev as any).fail_count : undefined;
-    const fws =
-      ev && typeof ev === "object" && !Array.isArray(ev) ? (ev as any).fail_within_sec : undefined;
-
-    const target = portText ? `${hostText}:${portText}` : hostText;
-
-    desc =
-      `【爆破后成功登录】${ipTag} 先在 ${fws || "短时间"}内失败` +
-      (fc ? ` ≥${fc} 次` : "多次") +
-      `，随后成功登录账号 ${userText} → ${target}，风险极高。`;
+  if (backendHuman && String(backendHuman).trim()) {
+    desc = String(backendHuman).trim();
   } else {
-    desc =
-      `【告警】检测到 ${typeText}` +
-      `，来源 ${ipTag}` +
-      ` → ${hostText}` +
-      (userText && userText !== "（未知账号）" ? `（账号 ${userText}）` : "") +
-      (portText ? `（端口 ${portText}）` : "") +
-      (win ? `，${win} 秒内 ${cnt} 次` : cnt ? `，累计 ${cnt} 次` : "") +
-      "。";
+    // ---- fallback: 前端兜底文案（只在老数据/旧告警时走）----
+    const { key } = stripRulePrefix(a.alert_type || "");
+    const k = (key || "").toUpperCase();
+
+    const ipTag = attackIp || "某来源 IP";
+    const hostText = host || "zmqzmq.cn";
+
+    if (k.includes("HTTP")) {
+      // HTTP：不要“失败xx次”，要“探测/枚举”
+      const urlPreview = targets.length ? targets.slice(0, 3).join("、") : `http://${hostText}/`;
+      const more = targets.length > 3 ? ` 等 ${targets.length} 个 URL` : "";
+      desc =
+        `检测到来源 IP ${ipTag} 对站点 ${hostText} 发起敏感路径探测请求：` +
+        `${urlPreview}${more}。` +
+        (win ? ` 行为在 ${win} 秒内集中出现，符合路径枚举/后台入口探测特征。` : ` 行为符合路径枚举/后台入口探测特征。`);
+    } else if (k.includes("SSH")) {
+      const publicHost = inferPublicHost(a, ev) || "";
+      const internalHost = inferInternalHost(a, ev) || "";
+      const asset = internalHost || publicHost || "unknown";
+      const p = portText || "22";
+      const userText = user || "未知账号";
+      const tag =
+        publicHost && internalHost && publicHost !== internalHost ? `（对外标识：${publicHost}）` : "";
+
+      desc =
+        `检测到来源 IP ${ipTag}` +
+        (win ? ` 在 ${win} 秒内` : " 短时间内") +
+        `对资产 ${asset}:${p} 发起异常认证尝试，失败 ${cnt} 次（账号 ${userText}）${tag}，` +
+        `行为特征符合 SSH 暴力破解/口令喷洒。`;
+    } else {
+      desc =
+        `检测到 ${typeText}，来源 ${ipTag} → ${hostText}` +
+        (win ? `，${win} 秒内 ${cnt} 次` : cnt ? `，累计 ${cnt} 次` : "") +
+        "。";
+    }
   }
 
   return {
@@ -481,11 +812,14 @@ function buildSummary(a: AlertRow, items: EvidenceItem[], ev: any) {
     port: portText,
     countText,
     desc,
+    targets,
+    targetUrls,// ✅ 顺手返回，方便你以后在 UI 里展示更漂亮
   };
 }
 
 function openEvidence(a: AlertRow) {
   modal.open = true;
+  ui.targetsExpanded = false;
   modal.alertId = a.id;
   modal.showRaw = false;
 
@@ -495,14 +829,36 @@ function openEvidence(a: AlertRow) {
   modal.recommendations = pickRecommendations(ev, a);
   modal.pretty = JSON.stringify(ev, null, 2);
 
+// ✅ 人话优先
+  modal.human = "";
+  if (ev && typeof ev === "object" && !Array.isArray(ev)) {
+    modal.human = String((ev as any).human_summary_cn || "").trim();
+  }
+  if (!modal.human) modal.human = String((a as any).human_summary_cn || "").trim();
+
   const s = buildSummary(a, modal.items, ev);
+
   modal.summary.typeText = s.typeText;
   modal.summary.attackIp = s.attackIp;
-  modal.summary.host = s.host;
+
+  const ssh = isSshAlert(a, ev);
+
+// ✅ 弹窗：SSH 的“目标主机”就是资产（server2）；HTTP 的“目标主机”就是站点（zmqzmq.cn）
+  modal.summary.host = ssh
+    ? (inferInternalHost(a, ev, modal.items) || "-")
+    : (inferPublicHost(a, ev) || displayTargetHost(a));
+
+// ✅ 弹窗：SSH 场景 internalHost 可以留空/或展示资产同值都行；这里展示资产更直观
+  modal.summary.internalHost = ssh
+    ? (inferInternalHost(a, ev, modal.items) || "")
+    : (inferInternalHost(a, ev, modal.items) || "");
+
   modal.summary.user = s.user;
   modal.summary.port = s.port;
   modal.summary.countText = s.countText;
   modal.summary.desc = s.desc;
+  modal.summary.targets = s.targets || [];
+  modal.summary.targetUrls = (s as any).targetUrls || [];
 }
 
 async function copyEvidence() {
@@ -734,5 +1090,170 @@ onMounted(async () => {
   margin: 6px 0;
   line-height: 1.55;
   color: rgba(255, 255, 255, 0.9);
+}
+
+/* ✅ targets */
+.targets {
+  padding-left: 18px;
+  margin: 6px 0 0 0;
+}
+.targets li {
+  margin: 6px 0;
+  line-height: 1.45;
+}
+.url {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.targets2 {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.trow {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.trow .line1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  line-height: 1.25;
+}
+
+.trow .line2 {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.25;
+  opacity: 0.85;
+  word-break: break-all; /* URL 不撑高 */
+}
+/* ✅ 行级高亮：只基于 exists/status（后端真实结果） */
+.trow.trow-exists {
+  border-color: rgba(34, 197, 94, 0.22);
+  background: rgba(34, 197, 94, 0.08);
+}
+
+.trow.trow-warn {
+  border-color: rgba(245, 158, 11, 0.24);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.trow.trow-bad {
+  border-color: rgba(239, 68, 68, 0.26);
+  background: rgba(239, 68, 68, 0.08);
+}
+/* path chip：更小、更紧凑 */
+.path {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.pill-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-weight: 800;
+  font-size: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.pill-exist {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-weight: 900;
+  font-size: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(255, 255, 255, 0.05);
+}
+.pill-exist.exist-yes {
+  border-color: rgba(34, 197, 94, 0.28);
+  background: rgba(34, 197, 94, 0.12);
+  color: rgba(187, 247, 208, 0.95);
+}
+.pill-exist.exist-no {
+  border-color: rgba(255, 255, 255, 0.14);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.72);
+  box-shadow: none;
+}
+.pill-exist.exist-unk {
+  border-color: rgba(245, 158, 11, 0.28);
+  background: rgba(245, 158, 11, 0.12);
+  color: rgba(253, 230, 138, 0.95);
+}
+
+.pill-status {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-weight: 800;
+  font-size: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(0, 0, 0, 0.14);
+  color: rgba(255, 255, 255, 0.78);
+}
+.pill-status.st-ok {
+  border-color: rgba(34, 197, 94, 0.28);
+  background: rgba(34, 197, 94, 0.12);
+  color: rgba(187, 247, 208, 0.95);
+}
+
+.pill-status.st-move {
+  border-color: rgba(59, 130, 246, 0.28);
+  background: rgba(59, 130, 246, 0.12);
+  color: rgba(191, 219, 254, 0.95);
+}
+
+.pill-status.st-warn {
+  border-color: rgba(245, 158, 11, 0.28);
+  background: rgba(245, 158, 11, 0.12);
+  color: rgba(253, 230, 138, 0.95);
+}
+
+.pill-status.st-miss {
+  border-color: rgba(255, 255, 255, 0.14);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.72);
+  box-shadow: none;
+}
+
+.pill-status.st-bad {
+  border-color: rgba(239, 68, 68, 0.28);
+  background: rgba(239, 68, 68, 0.12);
+  color: rgba(254, 202, 202, 0.95);
+}
+.targets-toggle {
+  margin-top: 6px;
+}
+
+.mini-toggle {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 10px;
+  font-size: 12px;
 }
 </style>

@@ -22,9 +22,9 @@ class Rule:
     dedup_key: str
     severity: str
     tags: List[str]
-    sequence: Optional[Dict[str, Any]]  # for fail->success
+    sequence: Optional[Dict[str, Any]]
 
-    # ✅ NEW: 人话字段（从 yml 读出来）
+    # 人类可读字段
     title: str = ""
     desc: str = ""
     why: str = ""
@@ -63,7 +63,6 @@ def _norm_rule(d: Dict[str, Any]) -> Rule:
         tags=list(d.get("tags", []) or []),
         sequence=d.get("sequence"),
 
-        # ✅ NEW
         title=str(d.get("title", "") or ""),
         desc=str(d.get("desc", "") or ""),
         why=str(d.get("why", "") or ""),
@@ -74,18 +73,20 @@ def _norm_rule(d: Dict[str, Any]) -> Rule:
 
 def load_rules(rules_dir: str) -> List[Rule]:
     rules: List[Rule] = []
+
     if not os.path.isdir(rules_dir):
         return rules
 
     for fn in os.listdir(rules_dir):
         if not fn.endswith((".yml", ".yaml")):
             continue
+
         path = os.path.join(rules_dir, fn)
         with open(path, "r", encoding="utf-8") as f:
-            d = yaml.safe_load(f) or {}
-        rule = _norm_rule(d)
+            data = yaml.safe_load(f) or {}
+
+        rule = _norm_rule(data)
         rules.append(rule)
 
-    # 固定排序，便于调试
     rules.sort(key=lambda r: r.id)
     return rules

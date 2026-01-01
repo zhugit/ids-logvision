@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 
 from .rules_loader import Rule, load_rules
 from .state_store import StateStore
 from .alert_builder import build_alert
 
+
+# -----------------------------
+# utils
+# -----------------------------
 
 def _fmt_key(template: str, rule_id: str, event: Dict[str, Any]) -> str:
     safe = {
@@ -19,10 +24,9 @@ def _fmt_key(template: str, rule_id: str, event: Dict[str, Any]) -> str:
 
 
 def _group_key(rule: Rule, event: Dict[str, Any]) -> str:
-    parts = []
-    for f in rule.group_by:
-        parts.append(f"{f}={event.get(f)}")
-    return "|".join(parts) if parts else "global"
+    if not rule.group_by:
+        return "global"
+    return "|".join(f"{f}={event.get(f)}" for f in rule.group_by)
 
 
 def _has_required_fields(rule: Rule, event: Dict[str, Any]) -> bool:
@@ -40,52 +44,84 @@ def _has_required_fields(rule: Rule, event: Dict[str, Any]) -> bool:
 
 
 def _match(rule: Rule, event: Dict[str, Any]) -> bool:
-    if event.get("log_source") != rule.log_source:
-        return False
+    """
+    核心匹配逻辑：
+    - log_source 支持 str / list[str]
+    - require 防空
+    - match 等值
+    - *_regex 正则
+    """
+    # 0) log_source
+    ev_src = event.get("log_source")
+    rule_src = rule.log_source
 
-    # 误报兜底：必需字段校验
+    if isinstance(rule_src, list):
+        if ev_src not in rule_src:
+            return False
+    else:
+        if ev_src != rule_src:
+            return False
+
+    # 1) require
     if not _has_required_fields(rule, event):
         return False
 
+    # 2) match 等值
     for k, v in (rule.match or {}).items():
         if event.get(k) != v:
             return False
+
+    # 3) *_regex
+    for k, pattern in (rule.__dict__ or {}).items():
+        if not k.endswith("_regex"):
+            continue
+        field = k[:-6]
+        value = event.get(field)
+        if value is None:
+            return False
+        try:
+            if not re.search(pattern, str(value)):
+                return False
+        except re.error:
+            return False
+
     return True
 
+
+# -----------------------------
+# Detection Engine
+# -----------------------------
 
 class DetectionEngine:
     def __init__(self, store: StateStore, rules_dir: str):
         self.store = store
         self.rules_dir = rules_dir
         self.rules: List[Rule] = []
-        # 人可读元信息
         self.rule_meta: Dict[str, Dict[str, Any]] = {}
 
     def reload(self) -> None:
         self.rules = [r for r in load_rules(self.rules_dir) if r.enabled]
 
+        for r in self.rules:
+            print(
+                "[RULE LOAD]",
+                "id=", r.id,
+                "require=", getattr(r, "require", None),
+                "distinct_on=", getattr(r, "distinct_on", None),
+                "group_by=", getattr(r, "group_by", None),
+            )
+
         meta: Dict[str, Dict[str, Any]] = {}
         for r in self.rules:
-            rid = getattr(r, "id", "") or ""
-            if not rid:
+            if not r.id:
                 continue
-
-            title = getattr(r, "title", "") or getattr(r, "name", "") or ""
-            desc = getattr(r, "desc", "") or ""
-            why = getattr(r, "why", "") or ""
-            advice = getattr(r, "advice", None)
-
-            if not title:
-                title = f"{rid}（规则引擎）"
-
-            meta[rid] = {
-                "rule_id": rid,
-                "rule_title": title,
-                "rule_desc": desc,
-                "rule_why": why,
-                "rule_advice": advice,
+            meta[r.id] = {
+                "rule_id": r.id,
+                "rule_title": r.title or r.name,
+                "rule_desc": r.desc or "",
+                "rule_why": r.why or "",
+                "rule_advice": r.advice,
             }
-
         self.rule_meta = meta
 
     def evaluate(self, event: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -98,44 +134,63 @@ class DetectionEngine:
             return alerts
 
         for rule in self.rules:
-            # sequence rule
+            print(
+                "[RULE EVAL]",
+                rule.id,
+                "log_source=", rule.log_source,
+                "event_source=", event.get("log_source"),
+                "path=", event.get("path"),
+                "distinct_on=", rule.distinct_on,
+            )
+
+            # ---------- sequence ----------
             if rule.sequence:
                 a = self._eval_sequence(rule, event, ts)
                 if a:
-                    rid = getattr(rule, "id", "") or ""
-                    meta = self.rule_meta.get(rid, {})
+                    meta = self.rule_meta.get(rule.id)
                     if meta:
                         a.update(meta)
                     alerts.append(a)
                 continue
 
-            # 普通窗口聚合
+            # ---------- normal window ----------
             if not _match(rule, event):
                 continue
 
             gk = _group_key(rule, event)
             key_base = f"{rule.id}:{gk}"
 
-            # distinct 逻辑（喷洒类）：这里只能给 distinct_count；events 仍可从普通窗口取“最近几条”
+            # ---------- distinct_on：用专用 distinct zset 计数 + 单独保存事件证据 ----------
             if rule.distinct_on:
-                dv = "|".join([str(event.get(f, "")) for f in rule.distinct_on])
-                cnt = self.store.window_distinct_count(key_base, ts, rule.window_sec, dv)
-                reached = cnt >= rule.threshold
-                extra = {"distinct_count": cnt, "window_sec": rule.window_sec}
+                dv = "|".join(str(event.get(f, "")) for f in rule.distinct_on)
 
-                # ✅ NEW：为了让前端有“多条证据”，也把普通事件写一份（不影响 distinct 计数）
-                member = str(event.get("raw_id") or f"{ts}")
+                # ✅ 1) distinct 计数：不受 keep_last 影响
+                cnt = self.store.window_distinct_count(
+                    key=key_base,
+                    ts=ts,
+                    window_sec=rule.window_sec,
+                    distinct_value=dv,
+                )
+
+                # ✅ 2) 事件证据：单独 key 存，触发时可回填 events
                 _, events = self.store.window_record_event(
                     key=f"{key_base}:evt",
                     ts=ts,
                     window_sec=rule.window_sec,
-                    member=member,
+                    member=str(event.get("raw_id") or ts),
                     event_obj=self._compact_event(event),
                     keep_last=50,
                 )
 
+                reached = cnt >= rule.threshold
+                extra = {
+                    "distinct_count": cnt,
+                    "window_sec": rule.window_sec,
+                }
+
+            # ---------- 普通窗口计数 ----------
             else:
-                member = str(event.get("raw_id") or f"{ts}")
+                member = str(event.get("raw_id") or ts)
                 cnt, events = self.store.window_record_event(
                     key=key_base,
                     ts=ts,
@@ -144,20 +199,30 @@ class DetectionEngine:
                     event_obj=self._compact_event(event),
                     keep_last=50,
                 )
+
                 reached = cnt >= rule.threshold
-                extra = {"count": cnt, "window_sec": rule.window_sec}
+                extra = {
+                    "count": cnt,
+                    "window_sec": rule.window_sec,
+                }
 
             if not reached:
                 continue
 
+            # ---------- cooldown ----------
             dedup = _fmt_key(rule.dedup_key, rule.id, event)
+
+            # ✅✅✅ 关键修复：cooldown_hit True=允许触发；False=冷却期禁止
             if not self.store.cooldown_hit(dedup, rule.cooldown_sec):
                 continue
 
-            a = build_alert(rule, event, gk, extra, events=events)
+            # ---------- build alert ----------
+            extra2 = dict(extra or {})
+            extra2["events"] = events
 
-            rid = getattr(rule, "id", "") or ""
-            meta = self.rule_meta.get(rid, {})
+            a = build_alert(rule, event, gk, extra2)
+
+            meta = self.rule_meta.get(rule.id)
             if meta:
                 a.update(meta)
 
@@ -165,9 +230,22 @@ class DetectionEngine:
 
         return alerts
 
-    def _eval_sequence(self, rule: Rule, event: Dict[str, Any], ts: int) -> Optional[Dict[str, Any]]:
-        if event.get("log_source") != rule.log_source:
-            return None
+    # -----------------------------
+    # sequence
+    # -----------------------------
+
+    def _eval_sequence(
+        self, rule: Rule, event: Dict[str, Any], ts: int
+    ) -> Optional[Dict[str, Any]]:
+
+        ev_src = event.get("log_source")
+        rule_src = rule.log_source
+        if isinstance(rule_src, list):
+            if ev_src not in rule_src:
+                return None
+        else:
+            if ev_src != rule_src:
+                return None
 
         if not _has_required_fields(rule, event):
             return None
@@ -175,53 +253,54 @@ class DetectionEngine:
         seq = rule.sequence or {}
         fail_count = int(seq.get("fail_count", 5))
         fail_within = int(seq.get("fail_within_sec", 300))
-        success_within = int(seq.get("success_within_sec", 60))
 
         gk = _group_key(rule, event)
         key_base = f"{rule.id}:{gk}"
 
         outcome = event.get("outcome")
+
         if outcome == "fail":
             self.store.record_fail(key_base, ts, fail_within)
             return None
 
         if outcome == "success":
-            if not self.store.had_recent_fail_burst(key_base, ts, fail_within, fail_count):
+            if not self.store.had_recent_fail_burst(
+                key_base, ts, fail_within, fail_count
+            ):
                 return None
 
             dedup = _fmt_key(rule.dedup_key, rule.id, event)
             if not self.store.cooldown_hit(dedup, rule.cooldown_sec):
                 return None
 
-            extra = {
-                "fail_count": fail_count,
-                "fail_within_sec": fail_within,
-                "success_within_sec": success_within,
-            }
-
-            # ✅ NEW：sequence 也尽量给 events（取最近 fail_within 内的一些）
-            # 这里不强依赖你是否提前记录事件：取不到就返回空列表也没关系
             try:
-                events = self.store.window_get_events(key_base, ts, fail_within, keep_last=50)
+                events = self.store.window_get_events(
+                    f"{key_base}:fail", ts, fail_within, keep_last=50
+                )
             except Exception:
                 events = []
 
-            return build_alert(rule, event, gk, extra, events=events)
+            extra = {
+                "fail_count": fail_count,
+                "fail_within_sec": fail_within,
+                "events": events,
+            }
+
+            return build_alert(rule, event, gk, extra)
 
         return None
 
+    # -----------------------------
+    # compact event
+    # -----------------------------
+
     @staticmethod
     def _compact_event(event: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        存入窗口 events 的“证据快照”，字段尽量对齐你前端表格：
-          ts / attack_ip(ip) / user / port / raw / host / source / raw_id
-        """
         return {
             "ts": event.get("ts"),
             "attack_ip": event.get("src_ip"),
             "ip": event.get("src_ip"),
-            "user": event.get("username"),
-            "port": event.get("port"),
+            "path": event.get("path"),
             "raw": event.get("raw"),
             "host": event.get("host"),
             "source": event.get("source"),

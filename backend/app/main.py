@@ -24,6 +24,9 @@ from .stream import (
 )
 
 from .services.parser.ssh import parse_ssh_failed
+from .services.parser.http_access import parse_http_access
+import inspect
+print("[DEBUG] parse_http_access from:", inspect.getfile(parse_http_access))
 from .services.detector.ssh_bruteforce import detect_ssh_bruteforce
 
 # ✅✅✅ DEBUG：确认当前运行时加载的 parse_ssh_failed 到底来自哪个文件（只定位，不影响功能）
@@ -60,6 +63,36 @@ app.add_middleware(
 # ✅ 中国时区（UTC+8）
 CHINA_TZ = timezone(timedelta(hours=8))
 
+# ✅ 多站点：内部资产名 -> 对外域名 映射（可通过环境变量注入，亮点：无需改代码即可扩展）
+# 例：ASSET_HOST_MAP='{"web-01":"zmqzmq.cn","web-02":"demo.zmqzmq.cn"}'
+ASSET_HOST_MAP = {}
+try:
+    ASSET_HOST_MAP = json.loads(os.getenv("ASSET_HOST_MAP", "{}"))
+except Exception:
+    ASSET_HOST_MAP = {}
+
+DEFAULT_PUBLIC_HOST = os.getenv("DEFAULT_PUBLIC_HOST", "zmqzmq.cn")
+
+def public_host(internal_host: Optional[str], parsed_http: Optional[dict] = None) -> str:
+    """
+    规则：
+    1) HTTP 优先用访问日志里解析到的 host（如果 parse_http_access 能拿到）
+    2) 再用 ASSET_HOST_MAP 映射 internal_host -> domain
+    3) 再兜底 DEFAULT_PUBLIC_HOST
+    """
+    # 1) HTTP Host 优先（多站点最靠谱）
+    if isinstance(parsed_http, dict):
+        h = (parsed_http.get("host") or parsed_http.get("server_name") or "").strip()
+        if h:
+            return h
+
+    # 2) 映射表
+    key = (internal_host or "").strip()
+    if key and key in ASSET_HOST_MAP:
+        return str(ASSET_HOST_MAP[key])
+
+    # 3) fallback
+    return DEFAULT_PUBLIC_HOST
 
 def now_cn() -> datetime:
     return datetime.now(CHINA_TZ)
@@ -132,7 +165,7 @@ def build_event_from_ssh_failed(parsed: dict, row: Any) -> dict:
         "src_ip": parsed.get("ip") or parsed.get("attack_ip") or "",
         "username": parsed.get("user") or "",
         "outcome": "fail",
-        "host": getattr(row, "host", None),
+        "host": public_host(getattr(row, "host", None), None),
         "source": getattr(row, "source", None),
         "raw_id": getattr(row, "id", None),
         "port": port,     # ✅ NEW
@@ -323,6 +356,146 @@ def ingest(
     except Exception:
         pass
 
+    # ✅ rule engine debug container (always defined)
+    debug_engine: Dict[str, Any] = {
+        "engine_enabled": os.getenv("RULE_ENGINE", "1") == "1",
+        "engine_alerted": False,
+        "engine_alert_ids": [],
+        "engine_alerts": [],
+        "engine_error": None,
+        "engine_event": None,
+    }
+
+    # =============================
+    # HTTP access log → Rule Engine
+    # =============================
+    try:
+        parsed_http = parse_http_access(row.message)
+    except Exception:
+        parsed_http = None
+
+    if debug:
+        debug_engine["http_parser_raw"] = parsed_http
+
+    if parsed_http:
+        # ✅ 强制兜底 path，避免 parser / import 混乱导致规则永远不触发
+        path = parsed_http.get("path")
+        if not path:
+            try:
+                import re
+                m = re.search(r'"[A-Z]+\s+(\S+)', row.message)
+                path = m.group(1) if m else ""
+            except Exception:
+                path = ""
+
+        # 1) 先把 path 写回去（你已经做对了）
+        parsed_http["path"] = path
+
+        # 2) ✅ 再兜底补 host（如果 parser 没解析出来）
+        if not (parsed_http.get("host") or "").strip():
+            try:
+                import re
+
+                # 情况A：日志里有 Host: xxx
+                m = re.search(r"\bHost:\s*([A-Za-z0-9\.\-]+)(?::\d+)?\b", row.message, re.I)
+
+                # 情况B：日志里有 host=xxx
+                if not m:
+                    m = re.search(r"\bhost=([A-Za-z0-9\.\-]+)(?::\d+)?\b", row.message, re.I)
+
+                # 情况C：你自己自定义格式里有 server_name=xxx
+                if not m:
+                    m = re.search(r"\bserver_name=([A-Za-z0-9\.\-]+)\b", row.message, re.I)
+
+                if m:
+                    parsed_http["host"] = m.group(1)
+            except Exception:
+                pass
+
+        # 3) 现在再算 pub（这时 public_host() 就能优先拿到真实域名）
+        pub = public_host(row.host, parsed_http)
+
+        ev = {
+            **parsed_http,
+            "ts": int(time.time()),
+            "host": pub,  # ✅ 事件host用对外域名（便于多站点规则）
+            "source": row.source,
+            "raw_id": row.id,
+        }
+
+        # ✅ 补齐 URL 关键字段（让告警描述可稳定拼完整目标URL）
+        if not ev.get("scheme"):
+            # 如果 access log 本身没有 scheme，大部分默认 http
+            ev["scheme"] = "https" if str(ev.get("dst_port") or "") == "443" else "http"
+
+        if not ev.get("dst_port"):
+            # 常见：80/443，没给就按 scheme 推断
+            ev["dst_port"] = 443 if ev["scheme"] == "https" else 80
+
+        # path 你已经兜底写回 parsed_http 了，但再兜一次更稳
+        if not ev.get("path"):
+            ev["path"] = path or "/"
+
+        # ✅ 关键补丁：统一 HTTP 源 IP 字段
+        if "src_ip" not in ev or not ev.get("src_ip"):
+            ev["src_ip"] = (
+                    ev.get("ip")
+                    or ev.get("client_ip")
+                    or ev.get("remote_addr")
+                    or ""
+            )
+
+        debug_engine["engine_event"] = ev
+
+        try:
+            engine_alerts = det_engine.evaluate(ev) or []
+        except Exception as e:
+            debug_engine["engine_error"] = repr(e)
+            engine_alerts = []
+
+        debug_engine["engine_alerts"] = engine_alerts
+        debug_engine["engine_alerted"] = bool(engine_alerts)
+
+        for ea in engine_alerts:
+            pub = public_host(row.host, parsed_http)
+            ra = Alert(
+                alert_type=f"RULE::{ea.get('rule_id')}",
+                severity=ea.get("severity", "MEDIUM"),
+                attack_ip=ea.get("src_ip", ""),
+                host=pub,
+                count=int(ea.get("count") or ea.get("distinct_count") or 0),
+                window_seconds=int(ea.get("window_sec") or 0),
+                evidence=safe_evidence(ea),
+            )
+            db.add(ra)
+            db.commit()
+            db.refresh(ra)
+
+            debug_engine["engine_alert_ids"].append(ra.id)
+
+            try:
+                publish_alert(
+                    {
+                        "id": str(ra.id),
+                        "alert_type": ra.alert_type,
+                        "severity": ra.severity,
+                        "attack_ip": ra.attack_ip,
+                        "host": ra.host,
+                        "count": str(ra.count),
+                        "window_seconds": str(ra.window_seconds),
+                        "evidence": ra.evidence,
+                        "created_at": fmt_cn(getattr(ra, "created_at", None)),
+                    }
+                )
+            except Exception:
+                pass
+
+        # =========================
+        # ✅ 关键：HTTP 处理完直接 return
+        # =========================
+        return {"ok": True, "id": row.id}
+
+
     # -----------------------------
     # ✅ 解析 + 检测（关键定位点）
     # -----------------------------
@@ -345,16 +518,6 @@ def ingest(
     # ✅ NEW: 标志位——rule engine 本次是否已经产出告警
     rule_alerted = False
     rule_alert_ids: List[int] = []
-
-    # ✅ rule engine debug container (always defined)
-    debug_engine: Dict[str, Any] = {
-        "engine_enabled": enable_rule_engine,
-        "engine_alerted": False,
-        "engine_alert_ids": [],
-        "engine_alerts": [],
-        "engine_error": None,
-        "engine_event": None,
-    }
 
     try:
         parsed = parse_ssh_failed(norm_msg)
@@ -401,7 +564,7 @@ def ingest(
                         "src_ip": getattr(parsed, "ip", "") or getattr(parsed, "attack_ip", "") or "",
                         "username": getattr(parsed, "user", "") or getattr(parsed, "username", "") or "",
                         "outcome": "fail",
-                        "host": getattr(row, "host", None),
+                        "host": public_host(getattr(row, "host", None), None),
                         "source": getattr(row, "source", None),
                         "raw_id": getattr(row, "id", None),
                         "raw": getattr(parsed, "raw", None),
@@ -428,14 +591,23 @@ def ingest(
                         evidence = safe_evidence(ea)
 
                         # ✅✅✅ rule engine 告警加前缀，区分来源
+                        pub = public_host(row.host, None)
+
+                        # ✅ 溯源保留：把内部资产名塞进 evidence（后续可在“原始JSON”里看到）
+                        try:
+                            if isinstance(ea, dict):
+                                ea["asset"] = {"internal_host": row.host, "public_host": pub}
+                        except Exception:
+                            pass
+
                         ra = Alert(
                             alert_type=f"RULE::{str(rule_id)}",
                             severity=str(severity),
                             attack_ip=str(attack_ip),
-                            host=row.host,
+                            host=pub,  # ✅ 这里一定要用 pub
                             count=cnt,
                             window_seconds=int(window_sec or 0),
-                            evidence=evidence,
+                            evidence=safe_evidence(ea),
                         )
                         db.add(ra)
                         db.commit()
@@ -510,11 +682,20 @@ def ingest(
                 alert_data = None
 
             if alert_data:
+                pub = public_host(row.host, None)
+
+                # ✅ classic 的 evidence 也加资产溯源（亮点：两套引擎证据结构统一）
+                try:
+                    if isinstance(alert_data.get("evidence"), dict):
+                        alert_data["evidence"]["asset"] = {"internal_host": row.host, "public_host": pub}
+                except Exception:
+                    pass
+
                 alert = Alert(
                     alert_type=alert_data["alert_type"],
                     severity=alert_data["severity"],
                     attack_ip=alert_data["attack_ip"],
-                    host=row.host,
+                    host=pub,  # ✅ 这里一定要用 pub
                     count=alert_data["count"],
                     window_seconds=alert_data["window_seconds"],
                     evidence=safe_evidence(alert_data["evidence"]),

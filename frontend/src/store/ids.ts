@@ -80,19 +80,14 @@ export const idsStore = reactive({
 
   // ✅ 关键修复：按“归一化 id”去重（解决 62 vs "62"）
   pushAlert(a: AlertRow) {
-    const id = this._idOfAlert(a);
-    if (!id) return;
-
-    const idx = this.alerts.findIndex((x) => this._idOfAlert(x) === id);
-
+    // ✅ 以 id 去重，但必须更新旧对象（否则 host 永远不变）
+    const idx = this.alerts.findIndex((x) => x.id === a.id);
     if (idx >= 0) {
-      // ✅ 合并更新更稳：避免部分字段在不同来源（WS/HTTP）缺失时把已有字段覆盖掉
-      this.alerts[idx] = { ...(this.alerts[idx] as any), ...(a as any) } as AlertRow;
+      this.alerts[idx] = { ...this.alerts[idx], ...a }; // ✅ 合并更新
     } else {
       this.alerts.unshift(a);
+      if (this.alerts.length > this.alertsMax) this.alerts.length = this.alertsMax;
     }
-
-    this._trimHead(this.alerts, this.alertsMax);
   },
 
   /**
