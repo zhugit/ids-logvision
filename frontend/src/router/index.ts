@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from "vue-router";
 import AdminLayout from "@/layout/AdminLayout.vue";
 import Logs from "@/pages/Logs.vue";
 import Alerts from "@/pages/Alerts.vue";
+import Console from "@/pages/Console.vue";
 
 const router = createRouter({
   history: createWebHistory(),
@@ -13,6 +14,7 @@ const router = createRouter({
       children: [
         { path: "logs", component: Logs },
         { path: "alerts", component: Alerts },
+        { path: "console", component: Console },
       ],
     },
   ],

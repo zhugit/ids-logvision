@@ -81,6 +81,7 @@ onUnmounted(() => {
   min-height:100vh;
 }
 
+/* ------------------- left side ------------------- */
 .side{
   width: 280px;
   padding: 18px 16px;
@@ -156,11 +157,18 @@ onUnmounted(() => {
   color: rgba(255,255,255,.55);
 }
 
+/* ------------------- right content ------------------- */
+/* ✅ 关键1：content 必须是 flex 列，并且有高度、允许子项撑开 */
 .content{
   flex: 1;
   padding: 18px 18px 22px;
+
+  display: flex;
+  flex-direction: column;
+  min-height: 0;   /* ✅ 关键：允许子项在 flex 中正确滚动/撑开 */
 }
 
+/* topbar 不动：它是固定高度 */
 .topbar-inner{
   display:flex;
   align-items:center;
@@ -180,7 +188,17 @@ onUnmounted(() => {
   color: rgba(255,255,255,.95);
 }
 
+/* ✅ 关键2：main 要吃掉剩余高度 */
 .main{
   margin-top: 16px;
+
+  flex: 1 1 auto; /* ✅ 吃剩余 */
+  min-height: 0;  /* ✅ 允许内部容器撑满 */
+}
+
+/* ✅ 关键3：RouterView 的容器必须能撑满高度 */
+.container{
+  height: 100%;
+  min-height: 0;
 }
 </style>

@@ -88,6 +88,7 @@
           <button class="btn ghost" @click="modal.showRaw = !modal.showRaw">
             {{ modal.showRaw ? "隐藏原始JSON" : "查看原始JSON" }}
           </button>
+          <button class="btn" @click="openConsole">打开控制台</button>
           <button class="btn" @click="copyEvidence">复制</button>
         </div>
       </div>
@@ -243,10 +244,25 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive } from "vue";
+import { useRouter } from "vue-router";
 import { http } from "@/api/http";
 import { idsStore as store } from "@/store/ids";
 import type { AlertRow } from "@/types/ids";
 
+const router = useRouter();
+
+// 你当前已验证可用的 noVNC 地址（先写死，后面第 3 步再做资产映射）
+const NOVNC_URL = "http://192.168.0.130:6080/vnc.html";
+
+function openConsole() {
+  router.push({
+    path: "/console",
+    query: {
+      url: NOVNC_URL,
+      alertId: String(modal.alertId), // 可选：方便你以后在控制台页显示“来自哪条告警”
+    },
+  });
+}
 function wsText(s: string) {
   if (s === "connected") return "已连接";
   if (s === "connecting") return "连接中";
