@@ -5,21 +5,27 @@
         <div class="h1">远程控制台</div>
         <div class="sub">
           <span class="tag">noVNC</span>
-          <span class="mono muted">{{ rawUrl }}</span>
-          <span v-if="alertId" class="tag tag2">来自告警 #{{ alertId }}</span>
+          <span class="mono muted">{{ displayUrl }}</span>
+          <span v-if="hasAlertId" class="tag tag2">来自告警 #{{ alertId }}</span>
         </div>
       </div>
 
       <div class="actions">
-        <button class="btn ghost" v-if="alertId" @click="backToAlerts">返回告警</button>
+        <button class="btn ghost" v-if="hasAlertId" @click="backToAlerts">返回告警</button>
+
+        <!-- ✅ 软刷新：同源就真刷新；跨域就只做重绘（不改 src，不重连） -->
         <button class="btn ghost" @click="reload">刷新控制台</button>
+
+        <!-- ✅ 真重连：一定改 src 强制重连 -->
+        <button class="btn ghost" @click="reconnect">重连</button>
+
         <button class="btn" @click="openNewTab">新窗口打开</button>
       </div>
     </div>
 
-    <!-- ✅ viewer 必须 overflow:hidden，且高度要由父级链路保证 -->
     <div class="card-inner viewer">
       <iframe
+        ref="frameEl"
         class="frame"
         :src="iframeSrc"
         title="noVNC Console"
@@ -31,67 +37,130 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watchEffect } from "vue";
+import { computed, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
 const route = useRoute();
 const router = useRouter();
 
-const rawUrl = computed(() => String(route.query.url || "").trim());
 const alertId = computed(() => String(route.query.alertId || "").trim());
+const hasAlertId = computed(() => alertId.value !== "");
+
+/**
+ * ✅ 关键：把路由里传来的 url 解码成“真实 URL”
+ * 你 Alerts.vue 里用了 encodeURIComponent，这里必须 decode 回来
+ */
+const rawUrl = computed(() => {
+  const v = String(route.query.url || "").trim();
+  if (!v) return "";
+  try {
+    return decodeURIComponent(v);
+  } catch {
+    return v;
+  }
+});
+
+const displayUrl = computed(() => rawUrl.value || "-");
 
 type BuildMode = "scale";
 
 /**
  * ✅ 给 noVNC URL 补参数：
- * - resize=scale：按容器缩放（让 noVNC 自适配你的 viewer，不要滚动条）
- * - autoconnect=1：自动连接（你想手动点“连接”就删掉这行）
+ * - resize=scale：按容器缩放
+ * - autoconnect=1：自动连接（你想要“手动点连接”就删掉这一行）
  */
 function withNoVncParams(u: string, mode: BuildMode = "scale") {
   if (!u) return "";
-  try {
-    const x = new URL(u);
+  const x = new URL(u);
 
-    if (mode === "scale") {
-      x.searchParams.set("resize", "scale");
-    }
-
-    // 你想保留“连接按钮”，就注释下一行
-    x.searchParams.set("autoconnect", "1");
-
-    return x.toString();
-  } catch {
-    const sep = u.includes("?") ? "&" : "?";
-    const extra = mode === "scale" ? "resize=scale&autoconnect=1" : "autoconnect=1";
-    return u + sep + extra;
+  if (mode === "scale") {
+    x.searchParams.set("resize", "scale");
   }
+
+  // 保持你当前的体验：一打开就自动连接
+  x.searchParams.set("autoconnect", "1");
+
+  return x.toString();
 }
 
 /**
- * ✅ 方案一：iframeSrc 独立维护
- * - 不去改路由 query（避免 url 越拼越长）
- * - reload 只改 iframeSrc，强制 iframe 重新加载 = 真重连
+ * ✅ iframe 只在“url 变了”时更新 src
+ * ✅ reload 不改 src（否则一定会触发重新加载/可能弹密码）
  */
 const iframeSrc = ref("");
+const frameEl = ref<HTMLIFrameElement | null>(null);
 
-function rebuildIframeSrc() {
-  const base = withNoVncParams(rawUrl.value, "scale");
-  if (!base) {
+// 保存“上一次的 base”，避免重复 set 导致 iframe 被重建
+let lastBase = "";
+
+/** 只加载一次（url 变了才更新），不带 _t */
+function loadOnce() {
+  if (!rawUrl.value) {
     iframeSrc.value = "";
+    lastBase = "";
     return;
   }
+
+  const base = withNoVncParams(rawUrl.value, "scale");
+  if (base === lastBase) return;
+
+  lastBase = base;
+  iframeSrc.value = base;
+}
+
+/** ✅ 真重连：强制让 iframe 重新加载（一定会重连） */
+function reconnect() {
+  if (!rawUrl.value) return;
+  const base = withNoVncParams(rawUrl.value, "scale");
+
   const x = new URL(base);
-  x.searchParams.set("_t", String(Date.now())); // 强制刷新
+  x.searchParams.set("_t", String(Date.now())); // ✅ 只有重连才加 _t
+
+  lastBase = base; // base 本身仍记录（不带 _t）
   iframeSrc.value = x.toString();
 }
 
+/**
+ * ✅ 软刷新：
+ * 1) 同源：iframe 内直接 location.reload() —— 有反应且通常不需要重新输密码
+ * 2) 跨域：无法访问 location，退化为触发 resize/重绘（不改 src，不重连）
+ */
 function reload() {
-  rebuildIframeSrc();
+  const el = frameEl.value;
+  if (!el) return;
+
+  try {
+    const w = el.contentWindow;
+    if (!w) return;
+
+    // ✅ 同源判断：能读到 location.href 才算同源
+    // 跨域读取会直接抛异常，被 catch
+    const href = w.location.href;
+
+    // 如果能读到 href，说明同源：直接真刷新
+    // 注意：这是真“页面刷新”，一般不会再弹 VNC 密码（取决于 noVNC 的保存/自动连接逻辑）
+    if (href) {
+      w.location.reload();
+      return;
+    }
+  } catch {
+    // 跨域：进这里
+  }
+
+  // ✅ 跨域退化：只触发重绘/重算布局（不改变 src，不重连）
+  try {
+    const w = el.contentWindow;
+    if (!w) return;
+
+    w.dispatchEvent(new Event("resize"));
+    w.postMessage({ type: "NOVNC_SOFT_REFRESH" }, "*");
+  } catch {}
 }
 
 function openNewTab() {
-  if (!iframeSrc.value) return;
-  window.open(iframeSrc.value, "_blank");
+  // 新窗口打开用 base（不带 _t），避免一开就强制重连
+  if (!lastBase) return;
+  window.open(lastBase, "_blank");
 }
 
 function backToAlerts() {
@@ -99,12 +168,13 @@ function backToAlerts() {
 }
 
 /**
- * ✅ 当路由 url 变化时自动重建 iframe src
- * （比如从告警点进来/换了目标控制台）
+ * ✅ 只在 rawUrl 真变化时才 loadOnce
  */
-watchEffect(() => {
-  if (rawUrl.value) rebuildIframeSrc();
-});
+watch(
+  () => rawUrl.value,
+  () => loadOnce(),
+  { immediate: true }
+);
 </script>
 
 <style scoped>
@@ -160,7 +230,7 @@ watchEffect(() => {
   flex: 1 1 auto;
   min-height: 0;
   padding: 0;
-  overflow: hidden; /* ✅ 关键：不要出现页面滚动条 */
+  overflow: hidden;
   border-radius: 14px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(0, 0, 0, 0.18);

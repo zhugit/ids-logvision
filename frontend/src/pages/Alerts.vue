@@ -252,7 +252,8 @@ import type { AlertRow } from "@/types/ids";
 const router = useRouter();
 
 // 你当前已验证可用的 noVNC 地址（先写死，后面第 3 步再做资产映射）
-const NOVNC_URL = "http://192.168.0.130:6080/vnc.html";
+//const NOVNC_URL = "http://8.141.7.186/novnc/vnc.html?path=novnc/websockify";
+const NOVNC_URL = "https://novnc.zmqzmq.cn/vnc.html?path=websockify&autoconnect=1&resize=scale";
 
 function openConsole() {
   router.push({
