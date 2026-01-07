@@ -27,6 +27,7 @@
 }
 
 *{ box-sizing:border-box; }
+html{ overflow-y: scroll; }
 html,body{ height:100%; }
 body{
   margin:0;

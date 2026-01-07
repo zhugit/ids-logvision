@@ -1,17 +1,42 @@
 from __future__ import annotations
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
+import os
+import re
 
-#from app.services.enricher.url_existence import url_checker
-
-
-# ✅ 统一对外展示域名（你指定）
-PUBLIC_HOST = "zmqzmq.cn"
+# from app.services.enricher.url_existence import url_checker
 
 
-def _public_host(_: str | None) -> str:
-    """把内部资产名统一映射为对外域名展示（不再出现 server1/server2/web-01）。"""
-    return PUBLIC_HOST
+# ✅ 可选：通过环境变量统一对外展示域名（不再写死）
+# 例如：Windows PowerShell：
+#   setx LOGVISION_PUBLIC_HOST "zmqzmq.cn"
+PUBLIC_HOST = (os.getenv("LOGVISION_PUBLIC_HOST") or "").strip()
+
+
+def _looks_like_ip_or_domain(host: str) -> bool:
+    h = (host or "").strip()
+    if not h:
+        return False
+    # 域名一般包含点；IP 包含数字+点
+    if "." in h:
+        return True
+    return False
+
+
+def _public_host(internal_or_host: str | None) -> str:
+    """
+    展示域名策略：
+    1) event.host 本身是域名/IP -> 直接用 event.host
+    2) event.host 像 server1/web-01 这种内部标签 -> 如果设置了 LOGVISION_PUBLIC_HOST，则用它；否则退回 internal host 原样
+    3) event.host 为空 -> 如果设置了 LOGVISION_PUBLIC_HOST，用它；否则 "unknown"
+    """
+    h = (internal_or_host or "").strip()
+    if h:
+        if _looks_like_ip_or_domain(h):
+            return h
+        # 看起来像内部资产标签
+        return PUBLIC_HOST or h
+    return PUBLIC_HOST or "unknown"
 
 
 def _extract_paths(extra: Optional[Dict[str, Any]]) -> List[str]:
@@ -76,7 +101,7 @@ def _guess_scheme_and_port(rule: Any, event: Dict[str, Any]) -> tuple[str, Optio
 
 def _format_url(scheme: str, host: str, port: Optional[int], path: str) -> str:
     scheme = (scheme or "http").strip().lower() or "http"
-    host = (host or "").strip() or PUBLIC_HOST
+    host = (host or "").strip() or "unknown"
     path = (path or "/").strip() or "/"
     if not path.startswith("/"):
         path = "/" + path
@@ -109,7 +134,7 @@ def _build_http_targets(rule: Any, base_event: Dict[str, Any], extra: Optional[D
         for p in _extract_paths(extra):
             targets.append(_format_url(scheme0, host0, port0, p))
 
-    # 兜底：如果连 path 都没有（极少），给一些常见敏感路径随机/固定组合
+    # 兜底：如果连 path 都没有（极少），给一些常见敏感路径固定组合
     if not targets:
         fallback = ["/admin", "/login", "/phpinfo.php", "/backup.zip", "/api/admin"]
         for p in fallback:
@@ -148,10 +173,9 @@ def _risk(rule: Any) -> str:
     return "low"
 
 
-def _human_summary_cn(rule: Any, event: Dict[str, Any], extra: Dict[str, Any] | None) -> str:
+def _human_summary_cn(rule: Any, event: Dict[str, Any], extra: Dict[str, Any] | None, host_pub: str) -> str:
     rid = (getattr(rule, "id", "") or "").upper()
     src_ip = event.get("src_ip") or "-"
-    host = "zmqzmq.cn"
 
     # HTTP 扫描类
     if rid in ("HTTP_PATH_BRUTEFORCE", "HTTP_SCAN", "HTTP_ADMIN_SCAN"):
@@ -165,7 +189,7 @@ def _human_summary_cn(rule: Any, event: Dict[str, Any], extra: Dict[str, Any] | 
         path_text = "、".join(paths) if paths else "多个敏感路径"
 
         return (
-            f"检测到来源 IP {src_ip} 对站点 {host} 发起敏感路径探测请求，"
+            f"检测到来源 IP {src_ip} 对站点 {host_pub} 发起敏感路径探测请求，"
             f"访问路径包括 {path_text}，"
             f"行为特征符合 Web 后台入口探测/路径枚举，"
             f"可能为入侵前置扫描行为。"
@@ -178,18 +202,17 @@ def _human_summary_cn(rule: Any, event: Dict[str, Any], extra: Dict[str, Any] | 
         atk = "SSH 暴力破解" if "BRUTE" in rid else "SSH 口令喷洒"
 
         return (
-            f"检测到来源 IP {src_ip} 针对 ssh://{host}:{port} 发起异常认证尝试，"
+            f"检测到来源 IP {src_ip} 针对 ssh://{host_pub}:{port} 发起异常认证尝试，"
             f"涉及账号 {user}，"
             f"行为模式符合 {atk} 特征，"
             f"存在账户被入侵风险。"
         )
 
-    return f"检测到来源 IP {src_ip} 针对 {host} 的异常访问行为。"
+    return f"检测到来源 IP {src_ip} 针对 {host_pub} 的异常访问行为。"
+
 
 def _url_semantic_tag(path: str) -> str:
-    """
-    路径语义标签：让证据更像安全产品
-    """
+    """路径语义标签：让证据更像安全产品"""
     p = (path or "").lower()
 
     if p in ("/admin", "/admin/"):
@@ -215,7 +238,7 @@ def _url_semantic_tag(path: str) -> str:
 def _normalize_and_enrich_urls(urls: list) -> list[dict]:
     """
     输入:
-      - ["http://zmqzmq.cn/admin", ...]
+      - ["http://example.com/admin", ...]
       - [{"url": "...", "tag": "..."} , ...]  (兼容)
     输出:
       - [{"url","path","tag","exists","status","note"}...]
@@ -274,7 +297,7 @@ def build_alert(
         "group_key": group_key,
 
         "src_ip": event.get("src_ip"),
-        # ✅ 前端表格/弹窗都用这个 host：统一域名
+        # ✅ 前端表格/弹窗都用这个 host：展示域名/IP（不再强制写死）
         "host": host_pub,
 
         "username": event.get("username"),
@@ -282,7 +305,7 @@ def build_alert(
         "ts": event.get("ts"),
         "raw_id": event.get("raw_id"),
 
-        # ✅ 可选：保留内部资产标签，便于你以后溯源，但 UI 不用展示
+        # ✅ 保留内部资产标签：便于溯源，但 UI 可不展示
         "asset": {
             "internal_host": event.get("host"),
             "public_host": host_pub,
@@ -292,7 +315,7 @@ def build_alert(
     if extra:
         payload.update(extra)
 
-    # ✅ assessment：前端“涉及目标 URL”从这里拿（必须有）
+    # ✅ assessment：前端“涉及目标 URL”从这里拿（必须有完整 URL）
     assessment: Dict[str, Any] = {
         "attack_type": _attack_type_cn(rule),
         "risk": _risk(rule),
@@ -304,8 +327,7 @@ def build_alert(
         # 1) 原始目标（保持兼容：List[str]）
         assessment["targets"] = _build_http_targets(rule, event, extra)
 
-        # 2) ✅ 新增：结构化目标（带语义标签 + 是否存在）
-        #    前端弹窗优先用 assessment.target_urls 渲染即可
+        # 2) ✅ 新增：结构化目标（带语义标签）
         try:
             assessment["target_urls"] = _normalize_and_enrich_urls(assessment["targets"])
         except Exception:
@@ -314,13 +336,12 @@ def build_alert(
     elif rid.startswith("SSH_"):
         port = event.get("port") or 22
         assessment["targets"] = [f"ssh://{host_pub}:{port}"]
-        # SSH 不做 HTTP 存在性探测（避免误判），给空数组保持字段一致
         assessment["target_urls"] = []
 
     payload["assessment"] = assessment
 
-    # ✅ 产品级描述：前端优先展示这个
-    payload["human_summary_cn"] = _human_summary_cn(rule, event, extra)
+    # ✅ 产品级描述：前端优先展示这个（不再写死域名）
+    payload["human_summary_cn"] = _human_summary_cn(rule, event, extra, host_pub)
 
     # 兼容旧字段
     payload["summary"] = f"{rule.name} | {group_key}"

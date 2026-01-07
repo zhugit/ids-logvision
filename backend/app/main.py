@@ -42,6 +42,7 @@ import json
 
 from .services.detection.engine import DetectionEngine
 from .services.detection.state_store import StateStore
+from .services.trace.integrate import integrate_trace_into_alert
 
 app = FastAPI(
     title="LogVision IDS API",
@@ -121,6 +122,28 @@ def safe_evidence(v: Any) -> Any:
     except Exception:
         return str(v)
 
+def evidence_to_obj(v: Any) -> Any:
+    """
+    ✅ 对外输出专用：把 DB 里存的 evidence(JSON字符串) 转成 dict
+    - v 是 dict/list：原样返回
+    - v 是 str：尝试 json.loads
+    - 失败：返回 {"evidence_text": 原字符串}
+    这样不会影响原有逻辑，只是让前端能正常读 evidence.trace
+    """
+    if v is None:
+        return {}
+    if isinstance(v, (dict, list)):
+        return v
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return {}
+        try:
+            obj = json.loads(s)
+            return obj
+        except Exception:
+            return {"evidence_text": v}
+    return {"evidence_value": str(v)}
 
 # -----------------------------
 # ✅ NEW: Detection Engine (Rule-as-Code)
@@ -471,6 +494,10 @@ def ingest(
             db.commit()
             db.refresh(ra)
 
+            integrate_trace_into_alert(db, ra)
+            db.commit()
+            db.refresh(ra)
+
             debug_engine["engine_alert_ids"].append(ra.id)
 
             try:
@@ -483,7 +510,7 @@ def ingest(
                         "host": ra.host,
                         "count": str(ra.count),
                         "window_seconds": str(ra.window_seconds),
-                        "evidence": ra.evidence,
+                        "evidence": evidence_to_obj(ra.evidence),
                         "created_at": fmt_cn(getattr(ra, "created_at", None)),
                     }
                 )
@@ -612,6 +639,9 @@ def ingest(
                         db.add(ra)
                         db.commit()
                         db.refresh(ra)
+                        integrate_trace_into_alert(db, ra)
+                        db.commit()
+                        db.refresh(ra)
                         debug_engine["engine_alert_ids"].append(ra.id)
 
                         # ✅ NEW: 记录 rule 告警标志，用于后续抑制 classic
@@ -628,7 +658,7 @@ def ingest(
                                     "host": ra.host,
                                     "count": str(ra.count),
                                     "window_seconds": str(ra.window_seconds),
-                                    "evidence": ra.evidence,
+                                    "evidence": evidence_to_obj(ra.evidence),
                                     "created_at": fmt_cn(getattr(ra, "created_at", None)),
                                 }
                             )
@@ -703,6 +733,9 @@ def ingest(
                 db.add(alert)
                 db.commit()
                 db.refresh(alert)
+                integrate_trace_into_alert(db, alert)
+                db.commit()
+                db.refresh(alert)
 
                 try:
                     publish_alert(
@@ -714,7 +747,7 @@ def ingest(
                             "host": alert.host,
                             "count": str(alert.count),
                             "window_seconds": str(alert.window_seconds),
-                            "evidence": alert.evidence,
+                            "evidence": evidence_to_obj(alert.evidence),
                             "created_at": fmt_cn(getattr(alert, "created_at", None)),
                         }
                     )
@@ -828,7 +861,7 @@ def list_alerts(limit: int = 50, db: Session = Depends(get_db)):
             host=a.host,
             count=a.count,
             window_seconds=a.window_seconds,
-            evidence=a.evidence,
+            evidence=evidence_to_obj(a.evidence),
             created_at=fmt_cn(getattr(a, "created_at", None)),
         )
         for a in rows
